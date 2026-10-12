@@ -1,0 +1,6 @@
+[submodule "ext/points-as-tori"]
+	path = ext/points-as-tori
+	url = https://github.com/xvdp/points-as-tori
+[submodule "ext/superfit"]
+	path = ext/superfit
+	url = https://github.com/xvdp/superfit
