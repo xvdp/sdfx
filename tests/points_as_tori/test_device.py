@@ -162,3 +162,23 @@ def test_gradient_is_the_frozen_lambda_gradient(cpu64):
 	print(f'frozen-λ gradient vs central differences: {rel(frozen, fd):.2e}; with the λ term: {rel(full, fd):.2e}')
 	assert rel(frozen, fd) > 1e-4  # the frozen-λ approximation is measurable ...
 	assert rel(full, fd) < 1e-7  # ... and fully accounted for by the λ term
+
+
+def test_default_dtype_is_float32(monkeypatch):
+	"""float32 unless set_device(..., torch.float64) is requested explicitly."""
+	monkeypatch.setattr(config, '_DEVICE', None)
+	monkeypatch.setattr(config, '_DTYPE', torch.float32)
+	config.set_device('cpu')
+	assert config.get_dtype() == torch.float32
+	points, normals, coeffs = random_tori(100)  # float64 NumPy inputs
+	P = config.as_wide(points, 3)
+	assert P.dtype == torch.float32
+	tdf = pat.TorusDistanceField(P, config.as_wide(normals, 3))
+	tori = tdf.fit_tori_from_forms(config.as_wide(coeffs, 6))
+	tdf.set_k_evaluation(16)
+	outputs = (*tori, *tdf.evaluate_distance_gradient_laplacian(config.as_wide(np.zeros((5, 3)), 3)))
+	assert all(t.dtype == torch.float32 for t in outputs)
+
+	config.set_device('cpu', torch.float64, force=True)
+	assert config.as_wide(points, 3).dtype == torch.float64
+	config.set_device('cpu', torch.float32, force=True)
