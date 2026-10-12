@@ -220,3 +220,87 @@ def test_training_reduces_loss(cpu32):
 	losses = [float(train_step(model, optimizer, *args)[0]) for _ in range(30)]
 	print(f'loss: first {losses[0]:.4f}, last {losses[-1]:.4f}')
 	assert losses[-1] < 0.95 * losses[0]
+
+
+def _shape(pad_points, dtype_seed=3, n_points=60, k=16):
+	data = synthetic_dataset(n_shapes=1, n_points=n_points, k=k, pad_points=pad_points, seed=dtype_seed)
+	return ptrain.upload_shape(tuple(data[k] for k in KEYS), 0)
+
+
+KEYS = ('positions', 'normals', 'neighbors', 'masks', 'mesh_vertices', 'mesh_faces', 'face_masks')
+
+
+def test_fill_padding_step_equals_unpadded(cpu64):
+	"""
+	With fill_padding, one AdamW step on a padded shape gives the same loss and parameters as on the same shape
+	without padding (padded points stay masked); without it, the gradient is all NaN (zeroed).
+	"""
+	s_unpadded, s_padded = _shape(0), _shape(8)
+	rng = np.random.default_rng(1)
+	q = torch.from_numpy(rng.uniform(-0.8, 0.8, size=(3, 32, 30)))
+	d = torch.from_numpy(rng.normal(scale=0.2, size=(32, 30)))
+
+	def one_step(s):
+		model, optimizer, train_step = ptrain.FundamentalFormPredictorTrainer(
+			**TINY, learning_rate=1e-3, warmup_steps=0
+		)
+		model.double()
+		optimizer = torch.optim.AdamW(model.parameters(), lr=0.0, eps=1e-8, weight_decay=0.0)
+		optimizer.schedule, optimizer.update_count = (lambda count: 1e-3), 0
+		loss, _ = train_step(
+			model, optimizer, s['mask'], s['mask'][:32], s['positions'], s['normals'], s['neighbors'], q, d
+		)
+		grads = torch.cat([p.grad.flatten() for p in model.parameters()])
+		return float(loss), torch.cat([p.detach().flatten() for p in model.parameters()]), grads
+
+	l0, p0, g0 = one_step(s_unpadded)
+	l1, p1, g1 = one_step(ptrain.fill_padding(s_padded))
+	l2, p2, g2 = one_step(s_padded)
+	assert l0 == pytest.approx(l1, rel=1e-14) and l0 == pytest.approx(l2, rel=1e-14)  # the loss never saw padding
+	assert float((g1 - g0).abs().max() / g0.abs().max()) < 1e-14
+	assert float((p1 - p0).abs().max()) < 1e-14
+	assert bool((g2 == 0).all())  # original behavior: all-NaN gradient, zeroed by zero_out_nans
+	# the first AdamW step with zero gradient does not move the parameters
+	model0, _, _ = ptrain.FundamentalFormPredictorTrainer(**TINY)
+	assert torch.equal(p2, torch.cat([p.detach().double().flatten() for p in model0.parameters()]))
+
+
+def test_fill_padding_leaves_valid_points_and_validation_unchanged(cpu32):
+	s = _shape(8)
+	f = ptrain.fill_padding(s)
+	m = s['mask']
+	assert torch.equal(f['positions'][:, m], s['positions'][:, m]) and torch.equal(f['neighbors'][m], s['neighbors'][m])
+	assert torch.equal(f['mask'], m)
+	assert torch.equal(f['positions'][:, ~m], s['positions'][:, :1].expand(3, int((~m).sum())))
+	assert (f['neighbors'] >= 0).all()
+
+	data = synthetic_dataset(n_shapes=2, n_points=60, k=16, pad_points=8, seed=4)
+	val = tuple(data[k] for k in KEYS)
+	model, _, _ = ptrain.FundamentalFormPredictorTrainer(**TINY)
+	model.eval()
+	a = ptrain._validation(model, val, 0, 32, 30, 42, fix_padding=True)
+	b = ptrain._validation(model, val, 0, 32, 30, 42, fix_padding=False)
+	assert a == pytest.approx(b, rel=1e-6) and np.isfinite(a).all()
+
+
+def test_fix_padding_option(cpu32, tmp_path):
+	"""The option reaches the loop: on padded data the two settings train different weights."""
+	train_file = save_synthetic_dataset(
+		str(tmp_path / 'padded.npz'), n_shapes=2, n_points=60, k=16, pad_points=8, seed=6
+	)
+	common = dict(
+		models_dir=str(tmp_path / 'models'),
+		val_data_filename=None,
+		plot_filepath=None,
+		n_queries_per_neighborhood=30,
+		**TINY,
+	)
+	fixed = ptrain.TrainFundamentalFormPredictor([train_file], 1, 1e-3, 32, 0, 1, 10, fix_padding=True, **common)
+	original = ptrain.TrainFundamentalFormPredictor([train_file], 1, 1e-3, 32, 0, 1, 10, fix_padding=False, **common)
+	init, _, _ = ptrain.FundamentalFormPredictorTrainer(**TINY)
+	flat = lambda m: torch.cat([p.detach().flatten() for p in m.parameters()])  # noqa: E731
+	moved_fixed = float((flat(fixed) - flat(init)).abs().max())
+	moved_original = float((flat(original) - flat(init)).abs().max())
+	print(f'max parameter change after one epoch: fix_padding=True {moved_fixed:.2e}, False {moved_original:.2e}')
+	assert moved_fixed > 0
+	assert moved_original == 0.0  # every shape is padded -> every gradient is zeroed; Adam moments stay 0

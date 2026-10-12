@@ -120,6 +120,30 @@ def upload_shape(data, shape_idx: int, dtype: Optional[torch.dtype] = None) -> d
 	)
 
 
+def fill_padding(shape: dict) -> dict:
+	"""
+	Deviation from the original (default on; TrainFundamentalFormPredictor(fix_padding=False) restores the original).
+
+	Padded points (mask False) have position 0, normal 0 and neighbor rows of -1, i.e. a neighborhood of identical
+	points with median neighbor distance m = 0; the network input p / m is 0/0 = NaN. The loss masks these points, but
+	backpropagation multiplies their zero cotangent by NaN partial derivatives (0 · NaN = NaN), and every weight
+	gradient ∂L/∂W = Σ_rows x_rowᵀ δ_row sums over all points, so all gradient entries become NaN and zero_out_nans
+	turns the step into a zero-gradient (momentum-only) AdamW step.
+
+	Fix: replace each padded point's position, normal and neighbor row by those of the first valid point. The mask is
+	unchanged, so padded points still do not enter the loss, the tori blend or the shift; the loss value is unchanged
+	and the gradient equals that of the unpadded shape (measured: 3.3e-18 relative, float64).
+	Device-side (torch.where / argmax), no host sync.
+	"""
+	mask = shape['mask']
+	first = torch.argmax(mask.to(torch.int8))  # index of the first valid point (first maximum)
+	out = dict(shape)
+	for key in ('positions', 'normals'):
+		out[key] = torch.where(mask, shape[key], shape[key][:, first, None])
+	out['neighbors'] = torch.where(mask[:, None], shape['neighbors'], shape['neighbors'][first])
+	return out
+
+
 def shape_generator(seed: int, *indices: int) -> torch.Generator:
 	"""Deterministic generator per (seed, epoch, shape, ...) — the analog of jax.random.fold_in chains."""
 	state = np.random.SeedSequence([seed, *indices]).generate_state(1, dtype=np.uint64)[0]
@@ -395,12 +419,15 @@ def TrainFundamentalFormPredictor(
 	narrow_band_offset: float = 0.2,
 	bbox_extension: float = 1.0,
 	seed: int = 42,
+	fix_padding: bool = True,
 ):
 	"""
 	Args:
 		load_model_path: Optional path to a saved model file (.pt, or the original .pkl) to use as warm start
 	Keyword-only arguments (added in the port; defaults are the values hard-coded in the original):
 		models_dir, val_data_filename, plot_filepath (None: no plot), architecture and sampling parameters, seed.
+		fix_padding: replace padded points by a valid point before the network (see fill_padding). True by default;
+			False reproduces the original, where any padded shape yields an all-NaN (zeroed) gradient.
 
 	Returns: the trained model (added in the port; the original returns None).
 	"""
@@ -545,6 +572,8 @@ def TrainFundamentalFormPredictor(
 
 			# Upload single shape to the device
 			shape = upload_shape(all_training_data[dataset_idx], shape_idx)
+			if fix_padding:
+				shape = fill_padding(shape)
 			positions = shape['positions']
 			normals = shape['normals']
 			neighbors = shape['neighbors']
@@ -631,7 +660,7 @@ def TrainFundamentalFormPredictor(
 			if val_data is not None:
 				model.eval()
 				val_loss, val_eikonality_loss = _validation(
-					model, val_data, epoch, batch_size, n_queries_per_neighborhood, seed
+					model, val_data, epoch, batch_size, n_queries_per_neighborhood, seed, fix_padding
 				)
 				model.train()
 
@@ -663,7 +692,7 @@ def TrainFundamentalFormPredictor(
 
 
 @torch.no_grad()
-def _validation(model, val_data, epoch, batch_size, n_queries_per_neighborhood, seed):
+def _validation(model, val_data, epoch, batch_size, n_queries_per_neighborhood, seed, fix_padding=True):
 	"""
 	Validation block of the original training loop. Per shape: mean of the per-batch losses over batches that contain
 	valid points; then the mean over shapes with at least one such batch. The `if jnp.sum(batch_mask) > 0` host
@@ -680,6 +709,8 @@ def _validation(model, val_data, epoch, batch_size, n_queries_per_neighborhood, 
 		val_rng = shape_generator(seed, epoch, 10000 + val_shape_idx)
 
 		shape = upload_shape(val_data, val_shape_idx)
+		if fix_padding:  # forward only: values are the same either way (padded tori are masked as non-finite)
+			shape = fill_padding(shape)
 		val_pos = shape['positions']
 		val_norm = shape['normals']
 		val_neigh = shape['neighbors']
@@ -793,7 +824,7 @@ def _plot_training_history(plot_filepath, train_losses, distance_losses, eikonal
 	print(f'Training history plot saved to {plot_filepath}')
 
 
-def train(dataset_dir: str = 'datasets/nice', models_dir: str = MODELS_DIR):
+def train(dataset_dir: str = 'datasets/nice', models_dir: str = MODELS_DIR, fix_padding: bool = True):
 	"""The original five-phase schedule; paths relative to the working directory, as in the original."""
 	ckpt = lambda name: os.path.join(models_dir, name + '.pt')  # noqa: E731
 
@@ -810,6 +841,7 @@ def train(dataset_dir: str = 'datasets/nice', models_dir: str = MODELS_DIR):
 		load_model_path=None,
 		final_save_filepath='FundamentalFormPredictor_pretrained',
 		models_dir=models_dir,
+		fix_padding=fix_padding,
 	)
 
 	# Phase 0: nicely sampled blobs
@@ -825,6 +857,7 @@ def train(dataset_dir: str = 'datasets/nice', models_dir: str = MODELS_DIR):
 		load_model_path=ckpt('FundamentalFormPredictor_pretrained'),
 		final_save_filepath='FundamentalFormPredictor_phase0',
 		models_dir=models_dir,
+		fix_padding=fix_padding,
 	)
 
 	# Phase 1: nicely sampled blobs and ABC meshes
@@ -843,6 +876,7 @@ def train(dataset_dir: str = 'datasets/nice', models_dir: str = MODELS_DIR):
 		load_model_path=ckpt('FundamentalFormPredictor_phase0'),
 		final_save_filepath='FundamentalFormPredictor_phase1',
 		models_dir=models_dir,
+		fix_padding=fix_padding,
 	)
 
 	# Phase 2: nicely sampled blobs and more ABC meshes
@@ -861,6 +895,7 @@ def train(dataset_dir: str = 'datasets/nice', models_dir: str = MODELS_DIR):
 		load_model_path=ckpt('FundamentalFormPredictor_phase1'),
 		final_save_filepath='FundamentalFormPredictor_phase2',
 		models_dir=models_dir,
+		fix_padding=fix_padding,
 	)
 
 	# Phase 3: nicely sampled blobs and even more ABC meshes
@@ -878,6 +913,7 @@ def train(dataset_dir: str = 'datasets/nice', models_dir: str = MODELS_DIR):
 		load_model_path=ckpt('FundamentalFormPredictor_phase2'),
 		final_save_filepath='FundamentalFormPredictor_phase3',
 		models_dir=models_dir,
+		fix_padding=fix_padding,
 	)
 
 	# Phase 4: everything from before, plus unevenly sampled data possibly with small gaps from a simulated scanning process
@@ -897,6 +933,7 @@ def train(dataset_dir: str = 'datasets/nice', models_dir: str = MODELS_DIR):
 		load_model_path=ckpt('FundamentalFormPredictor_phase3'),
 		final_save_filepath='FundamentalFormPredictor_phase4',
 		models_dir=models_dir,
+		fix_padding=fix_padding,
 	)
 
 
@@ -907,6 +944,11 @@ if __name__ == '__main__':
 	parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
 	parser.add_argument('--dataset-dir', default='datasets/nice')
 	parser.add_argument('--models-dir', default=MODELS_DIR)
+	parser.add_argument(
+		'--original-padding',
+		action='store_true',
+		help='reproduce the original: padded shapes give all-NaN (zeroed) gradients',
+	)
 	args = parser.parse_args()
 	config.set_device(args.device, torch.float32)
-	train(args.dataset_dir, args.models_dir)
+	train(args.dataset_dir, args.models_dir, fix_padding=not args.original_padding)

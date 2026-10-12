@@ -19,6 +19,7 @@ nanobind_add_module(pat_reference
     reference_module.cpp
     ${PAT_ROOT}/src/cpp/torus_distance.cpp
     ${PAT_ROOT}/src/cpp/shape_2d.cpp
+    ${PAT_ROOT}/src/cpp/bvh.cpp
 )
 # stub/ first so it shadows igl/copyleft/cgal/point_areas.h
 target_include_directories(pat_reference PRIVATE

@@ -99,10 +99,12 @@ The loop follows `training/train.py`: per epoch, shapes are shuffled; per shape,
    - The loss masks these points, but backpropagating a zero cotangent through NaN activations gives 0·NaN = NaN, and every weight gradient sums over all points.
    - Result: all 1,588,358 gradient entries are NaN (JAX and torch), and `zero_out_nans` turns the step into a zero-gradient AdamW step. Parameters still move by the momentum of earlier steps.
    - Any dataset whose shapes have fewer points than `max_points` is affected.
+   - **Fixed by default in the port** (see Deviations); `fix_padding=False` / `--original-padding` reproduces this.
 2. **The distance loss multiplies the error by the mask** (`error * valid_mask`) instead of selecting, so a NaN prediction makes the loss NaN even when its query is marked invalid.
 3. **`save_model` switches the model to eval mode** and training continues in it. This has no effect with `dropout_rate = 0`.
 
 **Deviations.**
+- **Padding fix (default on):** `fill_padding` replaces each padded point's position, normal and neighbor row by those of the first valid point before the network; the mask is unchanged. Measured: the loss is unchanged, the gradient equals the unpadded shape's to 3.3e-18 (float64), one AdamW step matches the unpadded step to 1e-14, validation values are unchanged. On a dataset whose shapes are all padded, one epoch with the original behavior changes no weight (max change 0.0) vs 5.9e-3 with the fix. Option: `TrainFundamentalFormPredictor(..., fix_padding=False)`, `train(fix_padding=False)`, CLI `--original-padding`.
 - **Learning-rate schedule:** computed in float64. optax computes it in float32, which cancels digits early in the warmup and near the end of a cosine. The maximum relative difference over the original's five phases is 1.97e-5.
 - **Checkpoints:** `.pt` instead of `.pkl`. Warm starts accept either.
 - **Initialization:** same distributions as flax (lecun-normal truncated), but different random values. The same torch seed also gives different values in different torch versions (2.1.2 vs 2.14.1).
