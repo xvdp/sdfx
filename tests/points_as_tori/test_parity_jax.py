@@ -27,15 +27,6 @@ def wide(x):
 	return torch.from_numpy(np.array(np.moveaxis(np.asarray(x), -1, 0)))
 
 
-@pytest.fixture
-def jax_x64(original):
-	import jax
-
-	jax.config.update('jax_enable_x64', True)
-	yield
-	jax.config.update('jax_enable_x64', False)
-
-
 def _random_fit_inputs(m=512, seed=0):
 	rng = np.random.default_rng(seed)
 	return rng.normal(size=(m, 3)), rng.normal(size=(m, 3)), rng.normal(scale=0.3, size=(m, 6)), rng

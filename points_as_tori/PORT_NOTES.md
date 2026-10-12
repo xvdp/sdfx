@@ -13,6 +13,8 @@ Source: `ext/points-as-tori` (JAX/flax.nnx network + C++/nanobind evaluator), MI
 | `network.py` | `src/pointsastori/network.py` | helpers, training-side torus math (`torus_precompute_masked`, `torus_distance_gradient_masked`), export, transformer |
 | `infer.py` | `src/pointsastori/infer.py` | `PointsAsTori`, `read_point_cloud` |
 | `convert_checkpoint.py` | — | flax `.pkl` -> torch `.pt` |
+| `training/train.py` | `training/train.py` | losses, schedule, train step, epoch loop, validation, checkpoints, the five-phase `train()` |
+| `training/mesh_sampling.py` | `training/mesh_sampling_jax.py` | on-the-fly query sampling and ground-truth signed distances |
 | `models/FundamentalFormPredictor.pt` | `src/pointsastori/models/FundamentalFormPredictor.pkl` | converted pre-trained weights (embed 128, 8 heads, 8 layers, mlp 512, k = 64; 1,588,358 parameters) |
 
 Function names are unchanged, including the `_jax` suffixes.
@@ -67,10 +69,63 @@ Per query q with neighbors N(q), oriented points p_i, and tori (c_i, a_i, R_i, r
 ## Not ported yet
 
 - **Point-area based functions** (CGAL `point_areas`): `signed_log_sum_exp(_gradient)`, `self_normalized_*`, `winding_number`, `fast_winding_number*`, `regularized_winding_number`. These raise `NotImplementedError`.
-- **Training-data generation:** `TriangleMesh`, `SDF2D`/`SDF3D`, `BoundingVolumeHierarchy`, `get_all_neighbors_and_subsample`, `sample_isosurface`.
-- **The training loop** (`training/*.py`). Its loss functions `torus_precompute_masked` and `torus_distance_gradient_masked` are ported and tested.
+- **Training-data generation** (`training/mesh_data.py`; uses the C++ `Mesh3D` sampler, thingi10k, pyvista, pyfqmr, ...): `TriangleMesh`, `SDF2D`/`SDF3D`, `BoundingVolumeHierarchy`, `get_all_neighbors_and_subsample`, `sample_isosurface`. The training port reads the `.npz` files it produces (or the pre-generated datasets linked in the original README).
 
-## Validation (`tests/points_as_tori`, 25 tests, CPU)
+## Training (`points_as_tori/training/`)
+
+The loop follows `training/train.py`: per epoch, shapes are shuffled; per shape, queries and ground truth are sampled on the device; per batch, the network predicts the coefficients of **all** points, the tori are fitted, and the loss over the batch's queries is backpropagated; then AdamW updates. Printed logs, checkpoint cadence, validation and the five training phases (`train()`) are the same.
+
+**Loss.** L = mean_valid |φ(q) − d_mesh(q)| + mean_valid |1 − |∇φ(q)||, where φ is the torus blend (`torus_distance_gradient_masked`).
+- Queries per neighborhood: 40 on the mesh, 40 in a ±0.2 band along face normals, 40 in the extended neighborhood box.
+- Ground truth: the brute-force distance to the mesh. The sign comes from the generalized winding number, Σ_f Ω_f > π meaning inside.
+
+**Correspondences.**
+- `nnx.value_and_grad` + `zero_out_nans` + `optax.adamw(warmup_cosine_decay_schedule)` → `backward()`, NaN gradient entries set to 0, `torch.optim.AdamW` with `lr = schedule(count)` set before each update. The Adam formulas are identical.
+- `jax.lax.cond` → `torch.where` with a safe denominator.
+- `jax.lax.dynamic_slice_in_dim` → start index clamped, so the last batch of a shape overlaps the previous one, as in JAX.
+- JAX keys `fold_in(epoch, shape)` → a `torch.Generator` seeded from (seed, epoch, shape).
+- `jax.random.choice(p=...)` → the same inverse-CDF arithmetic: `cumsum`, `r = c[-1](1 − u)`, `searchsorted`.
+
+**Layout and device.**
+- Queries are `(3, P, n_queries)` and ground truth `(P, n_queries)`. Meshes are `vertices (3, V)` and `faces (3, F)`.
+- Each shape is uploaded once per epoch (pinned, non-blocking on CUDA).
+- Losses accumulate on the device and are read back only where the original prints.
+- Validation replaces the `if jnp.sum(batch_mask) > 0` host branches with weights.
+- The whole step runs on `meta`: sampling, ground truth, loss, backward and AdamW.
+
+**Behavior inherited from the original (measured identically in JAX):**
+1. **Padded shapes give an all-NaN gradient.**
+   - Padded points have neighbor rows of −1, i.e. neighborhoods of identical zero points. Their median neighbor distance is 0, so the input features are 0/0.
+   - The loss masks these points, but backpropagating a zero cotangent through NaN activations gives 0·NaN = NaN, and every weight gradient sums over all points.
+   - Result: all 1,588,358 gradient entries are NaN (JAX and torch), and `zero_out_nans` turns the step into a zero-gradient AdamW step. Parameters still move by the momentum of earlier steps.
+   - Any dataset whose shapes have fewer points than `max_points` is affected.
+2. **The distance loss multiplies the error by the mask** (`error * valid_mask`) instead of selecting, so a NaN prediction makes the loss NaN even when its query is marked invalid.
+3. **`save_model` switches the model to eval mode** and training continues in it. This has no effect with `dropout_rate = 0`.
+
+**Deviations.**
+- **Learning-rate schedule:** computed in float64. optax computes it in float32, which cancels digits early in the warmup and near the end of a cosine. The maximum relative difference over the original's five phases is 1.97e-5.
+- **Checkpoints:** `.pt` instead of `.pkl`. Warm starts accept either.
+- **Initialization:** same distributions as flax (lecun-normal truncated), but different random values. The same torch seed also gives different values in different torch versions (2.1.2 vs 2.14.1).
+- **API:** architecture, sampling and path parameters of `TrainFundamentalFormPredictor` are keyword arguments, with the original values as defaults. It returns the trained model. The plot is skipped when matplotlib is missing.
+
+**A float64 detail of the original.** `flax.nnx.MultiHeadAttention` (dropout 0) calls `jax.nn.dot_product_attention`, whose XLA path casts the logits to float32 before the softmax (`jax/_src/nn/functions.py`). In float64 the original therefore agrees with an exact float64 attention only to about 1.2e-7. The torch attention agrees with a NumPy float64 reference to 6e-16. In float32, the setting used for training, this makes no difference. The float64 parity tests give the JAX model an exact attention.
+
+| training check | measured |
+|---|---|
+| closest point, solid angle, face properties, signed/unsigned distance, GWN vs JAX (float64) | ≤ 5e-16 (asserted ≤ 1e-13) |
+| `generate_shape_features` with replayed JAX random draws | float64: queries 2.4e-16, distances 3.9e-16; float32: 1.7e-7, 2.9e-7 |
+| SDF loss and all 1.59M parameter gradients, pre-trained model (float64) | loss ≤ 1e-12 relative; gradients max\|Δ\|/max\|g\| = 9.1e-14 |
+| 4 AdamW steps vs the original trainer (float64) | steps 0–1: loss 1.5e-15, params 4.8e-11; steps 2–3: loss ≤ 7.3e-9, params ≤ 1.8e-8 |
+| 4 AdamW steps, original unmodified (float32) | loss relative difference ≤ 5.8e-6 |
+| schedule vs optax | ≤ 2e-5 relative (float32 cancellation in optax) |
+| backward passes, torch 2.1.2 vs 2.14.1 (float64, same weights) | ≤ 6.3e-15 |
+| end-to-end run on synthetic torus meshes | 2 epochs + validation, checkpoints, warm start, inference from the trained checkpoint |
+
+About the 4-step float64 drift: Adam's update g/(|g| + ε) has derivative ε/(|g| + ε)², up to 1/(4ε) at |g| ≈ ε. This amplifies rounding-level gradient differences once moments accumulate.
+
+Training was run on CPU only; GPU throughput was not measured.
+
+## Validation of the inference port (CPU)
 
 The references are the original C++ built unmodified as `pat_reference` (`tests/points_as_tori/reference`; the CGAL point-area header is stubbed) and the original JAX package.
 
@@ -97,13 +152,6 @@ With all points as neighbors (10k queries, snail, float32) the times are compara
 
 ## Running the tests
 
-```
-pip install torch numpy plyfile pytest            # port
-pip install jax==0.8.2 flax==0.12.2 optax nanobind # references (optional)
-cmake -S tests/points_as_tori/reference -B build/pat_reference -G Ninja \
-      -Dnanobind_DIR=$(python -m nanobind --cmake_dir) -DPython_EXECUTABLE=$(which python)
-cmake --build build/pat_reference
-PAT_REFERENCE_DIR=build/pat_reference python -m pytest tests/points_as_tori -s
-```
-
-Tests that need the references are skipped when the references are unavailable.
+See the repository README (Install, Tests). 41 tests: 28 need only the port; 13 compare against the original JAX
+code (jax 0.8.2 / flax 0.12.2, Python >= 3.11) and the original C++ (`tests/points_as_tori/reference`), and are skipped
+when those are not available.

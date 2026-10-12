@@ -69,6 +69,42 @@ def reference():
 	return ref
 
 
+def _load_original_training():
+	"""training/train.py and training/mesh_sampling_jax.py of the original (mesh_data is stubbed: dataset generation
+	needs thingi10k, pyvista, ... and is not used by the training loop)."""
+	if _load_original() is None:
+		return None
+	try:
+		import matplotlib  # noqa: F401  (imported at the top of the original train.py)
+	except ImportError:
+		return None
+	sys.modules.setdefault('mesh_data', types.ModuleType('mesh_data'))
+	training_dir = os.path.join(REPO, 'ext', 'points-as-tori', 'training')
+	if training_dir not in sys.path:
+		sys.path.insert(0, training_dir)
+	import mesh_sampling_jax
+	import train
+
+	return types.SimpleNamespace(train=train, mesh_sampling=mesh_sampling_jax)
+
+
+@pytest.fixture(scope='session')
+def original_training():
+	mod = _load_original_training()
+	if mod is None:
+		pytest.skip('original JAX training code not importable (needs jax, flax, optax, matplotlib, pat_reference)')
+	return mod
+
+
+@pytest.fixture
+def jax_x64(original):
+	import jax
+
+	jax.config.update('jax_enable_x64', True)
+	yield
+	jax.config.update('jax_enable_x64', False)
+
+
 @pytest.fixture(scope='session')
 def original():
 	mod = _load_original()
