@@ -63,9 +63,9 @@ points, normals = pat.read_point_cloud('ext/points-as-tori/data/tooth.ply')  # (
 sdf = pat.PointsAsTori(points, normals)  # fits tori with the bundled pre-trained network
 
 # query points, (3, n) layout: row 0 = x, row 1 = y, row 2 = z (here 100k uniform random points in [-1, 1)^3)
-queries = torch.rand(3, 100_000, device='cuda') * 2 - 1
+queries = torch.rand(3, 100_000, device=pat.get_device()) * 2 - 1
 # or a regular grid (e.g. for marching cubes): 128^3 points
-xs = torch.linspace(-1, 1, 128, device='cuda')
+xs = torch.linspace(-1, 1, 128, device=pat.get_device())
 grid = torch.stack(torch.meshgrid(xs, xs, xs, indexing='ij')).reshape(3, -1)
 d_grid = sdf.signed_distance(grid).reshape(128, 128, 128)
 d, g = sdf.signed_distance_and_gradient(queries)  # (n,), (3, n) on the device
