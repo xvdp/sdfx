@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sdfx"
+version = "0.1.0"
+description = "Signed distance fields from point clouds: torch port of Points as Tori (inference and training)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = [
+  "torch>=2.1",  # tested: 2.1.2 (CUDA 12.1 wheel, Python 3.11) and 2.14.1 (Python 3.13)
+  "numpy",       # tested: 1.26.4 and 2.5.4
+  "plyfile",     # point-cloud / mesh I/O
+]
+
+[project.optional-dependencies]
+train = ["matplotlib"]  # training-history plot (skipped when missing)
+test = ["pytest"]
+# parity references for the tests: the original JAX code and the original C++ (built from tests/points_as_tori/reference)
+reference = ["jax==0.8.2", "flax==0.12.2", "optax", "nanobind", "matplotlib"]
+
+[tool.setuptools.packages.find]
+include = ["points_as_tori*"]
+
+[tool.setuptools.package-data]
+points_as_tori = ["models/*.pt", "PORT_NOTES.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
