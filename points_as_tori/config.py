@@ -39,7 +39,7 @@ def set_device(device: Union[str, torch.device], dtype: torch.dtype = torch.floa
 		force: allow changing an already set device (tests); tensors created before the change stay where they are.
 	"""
 	global _DEVICE, _DTYPE
-	device = torch.device(device)
+	device = torch.tensor(0, device=device).device # force init. torch.device('cuda') returns cuda with no index
 	if _DEVICE is not None and (_DEVICE != device or _DTYPE != dtype) and not force:
 		raise RuntimeError(f'points_as_tori device already set to {_DEVICE} ({_DTYPE}); pass force=True to change it')
 	_DEVICE = device
