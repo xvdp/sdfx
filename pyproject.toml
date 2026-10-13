@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sdfx"
 version = "0.1.0"
-description = "Signed distance fields from point clouds: torch port of Points as Tori (inference and training) and an SDF viewer"
+description = "Signed distance fields from point clouds: torch port of Points as Tori (inference, training, data generation) and an SDF viewer"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
@@ -18,6 +18,8 @@ dependencies = [
 [project.optional-dependencies]
 train = ["matplotlib"]  # training-history plot (skipped when missing)
 test = ["pytest"]
+# training-data generation (points_as_tori.training.mesh_data): mesh downloads/archives and mesh simplification
+dataset = ["thingi10k", "py7zr", "numpy-stl", "pyfqmr"]
 # viewer (sdfview): OpenGL 3.3 via moderngl; window via moderngl-window (pyglet backend by default, glfw optional)
 view = ["moderngl>=5.8", "moderngl-window>=3.0", "pyglet>=2.0"]
 # parity references for the tests: the original JAX code and the original C++ (built from tests/points_as_tori/reference)
