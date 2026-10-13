@@ -1,4 +1,25 @@
 # sdfx
+Comparing models that output SDFs. Submodules in this repo. `ext/points-as-tori` (PAT) and `ext/superfit`.  `git submodule update --init --recursive`.
+
+1. PAT: [`points-as-tori`](https://github.com/nzfeng/points-as-tori)
+   - submodules: nanobind (with robin_map), libigl, nanoflann and fcpw (which pulls eigen and slang-rhi)
+2. SUP: [`superfit`](https://github.com/BardOfCodes/superfit)
+
+PAT trains once and then predicts. SUP optimizes per shape
+
+## Gradient optimization
+| | PAT | SUP |
+|---|---|---|
+| SGD | **Trains offline once.** `training/train.py:252` uses `nnx.value_and_grad` with `optax.adamw` and a warmup-cosine schedule. | **Per shape on inference.** `fast_opt.py` and `mat_opt/optim.py` use `torch.optim.Adam`/`AdamW`, `.backward()` and `torch.compile`. |
+| Learned params | Transformer [4,4,128]  blocks, heads, embedding. Maps k-NN patches to 6 coeffs + closed form torus fit. | Params per primitive, with residual fitting and pruning. |
+| Cost per SDF | c++ with OpenMP and nanoflann on CPU, analytic grad d with `torus_distance.cpp`. |  Stepwise SDF optimization w backprop. |
+| Custom autograd | - | `custom_ops/varaxis_sf_cuda.py`: CUDA `torch.autograd` . |
+| Dependencies | flax nnx, optax, nanoflann, libigl, fcpw | cubvh, kaolin, geolipi, sysl (generates GLSL) |
+
+## Licenses
+SUP is mostly Adobe Research License: non-commercial use only, and derivative works must carry the same restriction.
+
+# PAT port
 
 Signed distance fields from point clouds.
 
@@ -9,13 +30,13 @@ Signed distance fields from point clouds.
 ## Install (conda + pip)
 
 ```bash
-git clone --recurse-submodules -b claude/gallant-dijkstra-50fc4k https://github.com/xvdp/sdfx
+git clone --recurse-submodules https://github.com/xvdp/sdfx
 cd sdfx
 conda create -n sdfx python=3.12 -y
 conda activate sdfx
 
 # 1. torch: choose the build that matches your NVIDIA driver (check with `nvidia-smi`)
-pip install torch                                                         # PyPI default; was the CUDA 13.0 build (torch 2.14.1+cu130), needs driver >= 580
+pip install torch  # PyPI default as of 20160915 CUDA 13.0 build (torch 2.14.1+cu130), needs driver >= 580
 # pip install torch --index-url https://download.pytorch.org/whl/cu128    # for older drivers (CUDA 12.8 build)
 
 # 2. this package (editable) + optional extras: train = matplotlib plot, test = pytest
@@ -24,14 +45,12 @@ pip install -e ".[train,test]"
 
 Requirements (`pyproject.toml`): Python >= 3.9, torch >= 2.1, numpy, plyfile. Tested combinations:
 
-| Python | torch | NumPy | result |
+| python | torch | numpy | result |
 |---|---|---|---|
 | 3.13.16 | 2.14.1+cu130 | 2.5.4 | all 41 tests pass (with the JAX/C++ references) |
-| 3.11 | 2.1.2+cu121 | 1.26.4 | 28 pass; 13 reference tests skipped (JAX 0.8.2 needs Python >= 3.11 and was not installed) |
 | 3.12.3 | 2.14.1+cu130 | 2.5.4 | non-editable `pip install .`, inference + training import from outside the repo |
+| 3.11 | 2.1.2+cu121 | 1.26.4 | 28 pass; 13 reference tests skipped (JAX 0.8.2 needs Python >= 3.11) |
 
-torch 2.1.2 with NumPy 2 fails (`RuntimeError: Numpy is not available` in `torch.from_numpy`); with an older torch use
-`numpy<2`. All runs were on CPU; no GPU was available to test CUDA.
 
 ## Run
 
@@ -39,7 +58,7 @@ torch 2.1.2 with NumPy 2 fails (`RuntimeError: Numpy is not available` in `torch
 import torch
 import points_as_tori as pat
 
-pat.set_device('cuda')  # once; float32 by default (set_device('cuda', torch.float64) for float64 geometry)
+pat.set_device('cuda')  # once; float32 default (set_device('cuda', torch.float64) for float64 geometry)
 points, normals = pat.read_point_cloud('ext/points-as-tori/data/tooth.ply')  # (N, 3) NumPy
 sdf = pat.PointsAsTori(points, normals)  # fits tori with the bundled pre-trained network
 
