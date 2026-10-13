@@ -1,5 +1,5 @@
 """
-LBVH (sdfview.accel.lbvh, torch) vs the original SAH BVH (C++, ext/points-as-tori/src/cpp/bvh.cpp):
+LBVH (points_as_tori.bvh, torch) vs the original SAH BVH (C++, ext/points-as-tori/src/cpp/bvh.cpp):
 build time, peak memory, tree size / depth, and k-NN traversal cost (nodes popped and points tested per query,
 through the same algorithm as the shader). Also the torch brute-force k-NN the evaluator uses, for scale.
 
@@ -27,7 +27,7 @@ import torch
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, REPO)
 
-from sdfview.accel.lbvh import build_lbvh, from_cpp_layout, knn_reference  # noqa: E402
+from points_as_tori.bvh import build_lbvh, from_cpp_layout, knn_reference  # noqa: E402
 
 
 def sphere_points(n: int, seed: int = 0) -> np.ndarray:

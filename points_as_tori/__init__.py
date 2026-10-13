@@ -23,3 +23,5 @@ from .config import set_device, get_device, get_dtype, as_wide, to_numpy  # noqa
 from .network import FundamentalFormPredictor  # noqa: F401
 from .infer import PointsAsTori, read_point_cloud  # noqa: F401
 from .shape_3d import *
+from .bvh import BVH  # noqa: F401
+from .isosurface import marching_cubes, mesh_isocontour  # noqa: F401

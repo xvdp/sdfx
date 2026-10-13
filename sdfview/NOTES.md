@@ -9,7 +9,7 @@ second: any SDF sampled on a grid (the route for SUP and for comparisons).
 sdfview/
   scene.py                 file format (.sdfx): JSON manifest + binary arrays, Python reader/writer
   camera.py, settings.py   orbit camera and view settings (NumPy / plain data, backend independent)
-  accel/lbvh.py            LBVH over points built with torch (Karras 2012), original PAT node layout
+  accel/lbvh.py            re-export of the LBVH builder in points_as_tori/bvh.py (port of the original bvh.cpp)
   sources/pat.py           PointsAsTori -> scene (points, tori, BVH, point cloud, optional grid bake)
   sources/grid.py          any torch SDF -> regular grid, in z-slabs
   shaders/__init__.py      GLSL assembly: version header per target (gl330 | webgl2) + #include resolution
@@ -33,7 +33,7 @@ binary chunk (each array 16 B aligned). Arrays are stored in the layout the shad
 4 values), so backends upload them without reshuffling; the torch side is structure-of-arrays (3, n) and converts
 once at export. Field types: `pat` (points, tori, BVH) and `grid` (vertex-aligned samples).
 
-## LBVH (accel/lbvh.py)
+## LBVH (points_as_tori/bvh.py, re-exported as sdfview.accel.lbvh)
 
 Morton codes (21 bits per axis, 63-bit keys) → sort → Karras 2012 radix tree (per internal node: direction, range
 end and split by binary search over common-prefix lengths of (code, index) keys) → leaf collapse (ranges ≤ 4
