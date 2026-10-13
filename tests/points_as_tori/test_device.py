@@ -182,3 +182,19 @@ def test_default_dtype_is_float32(monkeypatch):
 	config.set_device('cpu', torch.float64, force=True)
 	assert config.as_wide(points, 3).dtype == torch.float64
 	config.set_device('cpu', torch.float32, force=True)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='needs CUDA')
+def test_cuda_device_has_index():
+	"""set_device('cuda') must resolve to an indexed device ('cuda:0'), the device tensors report; otherwise every
+	device check (tensor.device != get_device()) fails. (CPU and meta devices have no index, so CPU tests cannot see it.)"""
+	config.set_device('cuda', torch.float32, force=True)
+	try:
+		assert config.get_device().index is not None
+		assert torch.zeros(1, device=config.get_device()).device == config.get_device()
+		points, normals, coeffs = random_tori(200)
+		tdf = pat.TorusDistanceField(config.as_wide(points, 3), config.as_wide(normals, 3))
+		tdf.fit_tori_from_forms(config.as_wide(coeffs, 6))
+		assert tdf.evaluate_distance(config.as_wide(np.zeros((4, 3)), 3)).device == config.get_device()
+	finally:
+		config.set_device('cpu', torch.float32, force=True)

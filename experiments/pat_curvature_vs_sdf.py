@@ -19,15 +19,27 @@ import numpy as np
 import torch
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path[:0] = [REPO, os.path.join(REPO, 'tests', 'points_as_tori')]
+sys.path.insert(0, REPO)
 
 import points_as_tori as pat  # noqa: E402
+from points_as_tori.infer import DEFAULT_MODEL_PATH as TORCH_MODEL  # noqa: E402
 from points_as_tori.shape_2d import orthonormal_basis  # noqa: E402
 from points_as_tori.torus_distance import get_torus_parameters_python  # noqa: E402
 from points_as_tori.training import mesh_sampling as pms  # noqa: E402
-from helpers import TORCH_MODEL, sample_mesh  # noqa: E402
 
 DATA = os.path.join(REPO, 'ext', 'points-as-tori', 'data')
+
+
+def sample_mesh(vertices, faces, n_points, rng):
+	"""Area-uniform samples on a triangle mesh with face normals: α = √u (1 - v), β = v √u, γ = 1 - α - β."""
+	v0, v1, v2 = vertices[faces[:, 0]], vertices[faces[:, 1]], vertices[faces[:, 2]]
+	cr = np.cross(v1 - v0, v2 - v0)
+	area = 0.5 * np.linalg.norm(cr, axis=1)
+	f = rng.choice(len(faces), size=n_points, p=area / area.sum())
+	su, t = np.sqrt(rng.random(n_points)), rng.random(n_points)
+	alpha, beta = su * (1 - t), t * su
+	points = alpha[:, None] * v0[f] + beta[:, None] * v1[f] + (1 - alpha - beta)[:, None] * v2[f]
+	return points, cr[f] / np.linalg.norm(cr[f], axis=1, keepdims=True)
 
 
 def read_obj(path):

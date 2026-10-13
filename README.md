@@ -104,6 +104,41 @@ points, normals = pat.read_point_cloud('ext/points-as-tori/data/tooth.ply')
 sdf = pat.PointsAsTori(points, normals, model_path='models/FundamentalFormPredictor_pretrained.pt')
 ```
 
+# Viewer (sdfview)
+
+`sdfview/`: scene format (`.sdfx`), LBVH built with torch, GLSL field/render modules (GL 3.3 and WebGL2 from one source),
+moderngl renderer (window, headless, embeddable). Notes and measurements: `sdfview/NOTES.md`.
+```bash
+pip install -e ".[view]"
+# build a scene from a point cloud (tori on the device, LBVH, optional grid bake for a fast surface)
+python -m sdfview pat ext/points-as-tori/data/tooth.ply -o tooth.sdfx --device cuda --bake 128 [--view]
+
+python -m sdfview view tooth.sdfx                    # window
+python -m sdfview view tooth.sdfx --surface pat      # surface from the exact field (slower)
+python -m sdfview render tooth.sdfx -o tooth.png --size 1200 900 --points --axis x --clip   # no window
+python -m sdfview info tooth.sdfx
+
+python benchmarks/lbvh_bench.py --device cuda --sizes 1e5 1e6 4e6      # please run this on your GPU
+PAT_REFERENCE_DIR=build/pat_reference pytest tests/sdfview -s           # prints the measured differences
+```
+From torch
+
+```python
+import points_as_tori as pat, sdfview
+from sdfview.sources.pat import scene_from_pat
+pat.set_device('cuda')
+sdf = pat.PointsAsTori(*pat.read_point_cloud('ext/points-as-tori/data/tooth.ply'))
+scene = scene_from_pat(sdf, k=32, bake_resolution=128)
+sdfview.show(scene)                      # or scene.save('tooth.sdfx')
+
+# embedded: any current moderngl context
+import moderngl
+from sdfview import OrbitCamera, ViewSettings
+from sdfview.backends.moderngl import Renderer
+r = Renderer(moderngl.create_context(), scene)
+r.draw(OrbitCamera.fit(r.box_min, r.box_max), ViewSettings(show_points=True), viewport=(0, 0, w, h))
+```
+
 ## Tests
 
 ```bash
