@@ -102,9 +102,16 @@ def get_device(torch_device: torch.device):
 			# lazily. Make this GPU current and its primary context exist (one allocation) before creating.
 			with torch.cuda.device(torch_device):
 				torch.empty(1, device=torch_device)
-				device = spy.create_torch_device(
-					type=device_type, torch_device=torch_device, include_paths=[SHADER_DIR]
-				)
+				try:
+					device = spy.create_torch_device(
+						type=device_type, torch_device=torch_device, include_paths=[SHADER_DIR]
+					)
+				except RuntimeError as e:
+					raise RuntimeError(
+						f'{e}\nslangpy {type_name} device for {torch_device} not created. A CUDA device compiles '
+						'kernels with NVRTC; an NVRTC newer than the driver gives CUDA_ERROR_UNSUPPORTED_PTX_VERSION. '
+						'Details: python -m points_as_tori.knn_slang (see PORT_NOTES.md, "Fused Slang kernel")'
+					) from e
 		else:
 			adapter_luid = None
 			if config.SLANG_ADAPTER is not None:
@@ -227,6 +234,102 @@ def knn(queries: torch.Tensor, points: torch.Tensor, k: int, searcher: Optional[
 	return searcher.find_k_nearest(queries, k)[0]
 
 
+def _cuda_driver_version() -> Optional[Tuple[int, int]]:
+	"""Highest CUDA version the installed driver supports (cuDriverGetVersion), or None without a driver."""
+	import ctypes
+
+	try:
+		lib = ctypes.CDLL('libcuda.so.1')
+	except OSError:
+		return None
+	v = ctypes.c_int()
+	if lib.cuDriverGetVersion(ctypes.byref(v)) != 0:
+		return None
+	return v.value // 1000, (v.value % 1000) // 10
+
+
+def _nvrtc_version(path: str) -> Optional[Tuple[int, int]]:
+	"""(major, minor) of the NVRTC library at `path` (or loader name), None if it does not load."""
+	import ctypes
+
+	try:
+		lib = ctypes.CDLL(path)
+	except OSError:
+		return None
+	major, minor = ctypes.c_int(), ctypes.c_int()
+	if lib.nvrtcVersion(ctypes.byref(major), ctypes.byref(minor)) != 0:
+		return None
+	return major.value, minor.value
+
+
+def _rhi_nvrtc_dirs() -> list:
+	"""
+	Directories slang-rhi searches for libnvrtc.so on Linux, in order (slang-rhi src/cuda/cuda-nvrtc.cpp); the first
+	holding a file named exactly libnvrtc.so is used for the device's internal kernels.
+	"""
+	dirs = []
+	cuda_path = os.environ.get('CUDA_PATH')
+	if cuda_path:
+		dirs += [os.path.join(cuda_path, d) for d in ('lib64', 'lib', os.path.join('targets', 'x86_64-linux', 'lib'))]
+	try:
+		toolkits = sorted(
+			(e.path for e in os.scandir('/usr/local') if e.is_dir() and e.name.startswith('cuda')), reverse=True
+		)
+	except OSError:
+		toolkits = []
+	for t in toolkits:
+		for d in (os.path.join(t, 'lib64'), os.path.join(t, 'targets', 'x86_64-linux', 'lib')):
+			if d not in dirs:
+				dirs.append(d)
+	dirs.append('/usr/lib/x86_64-linux-gnu/')
+	return dirs
+
+
+def _loaded_path(prefix: str) -> Optional[str]:
+	"""Path of a shared library mapped into this process whose file name starts with `prefix` (/proc/self/maps)."""
+	try:
+		with open('/proc/self/maps') as f:
+			for line in f:
+				path = line.split()[-1]
+				if os.path.basename(path).startswith(prefix):
+					return path
+	except OSError:
+		pass
+	return None
+
+
+def _report_nvrtc() -> None:
+	"""Print the driver's CUDA version and the NVRTC each lookup resolves to, flagging NVRTC newer than the driver."""
+	driver = _cuda_driver_version()
+	print(f'CUDA driver: {"none" if driver is None else "supports CUDA %d.%d" % driver}')
+	print(f'CUDA_PATH: {os.environ.get("CUDA_PATH", "unset")}')
+
+	def describe(path, version):
+		if version is None:
+			return f'{path} (did not load)'
+		text = f'{path}, NVRTC {version[0]}.{version[1]}'
+		if driver is not None and version > driver:
+			text += f'  <- newer than the driver (CUDA {driver[0]}.{driver[1]}): its PTX is rejected'
+		return text
+
+	found = None
+	for d in _rhi_nvrtc_dirs():
+		candidate = os.path.join(d, 'libnvrtc.so')
+		if os.path.isfile(candidate):
+			if found is None:
+				found = candidate
+				print(f'slang-rhi NVRTC (device creation): {describe(candidate, _nvrtc_version(candidate))}')
+			else:
+				print(f'  also available: {describe(candidate, _nvrtc_version(candidate))}')
+	if found is None:
+		print('slang-rhi NVRTC (device creation): no libnvrtc.so in its search directories')
+	version = _nvrtc_version('libnvrtc.so')
+	loaded = _loaded_path('libnvrtc.so') if version is not None else None
+	print(
+		f'Slang NVRTC (kernel compilation, dlopen libnvrtc.so): {describe(loaded, version) if version else "not found"}'
+	)
+
+
 def diagnose(n_points: int = 20000, n_queries: int = 2000, k: int = 16) -> int:
 	"""
 	Print versions, adapters, and for each torch device (cpu, every cuda:i) and slangpy device type the outcome of
@@ -261,6 +364,7 @@ def diagnose(n_points: int = 20000, n_queries: int = 2000, k: int = 16) -> int:
 			print(f'slangpy {type_name} adapters: {[a.name for a in adapters]}')
 		except Exception as e:  # noqa: BLE001
 			print(f'slangpy {type_name} adapters: error {type(e).__name__}: {e}')
+	_report_nvrtc()
 
 	configs = [('cpu', None)]
 	for i in range(torch.cuda.device_count()):
