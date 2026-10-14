@@ -439,6 +439,19 @@ def _environment_report() -> None:
 	_report_nvrtc()
 
 
+def _cuda_health() -> list:
+	"""[(i, None or error text)]: allocate, compute and synchronize with torch on every CUDA device."""
+	out = []
+	for i in range(torch.cuda.device_count()):
+		try:
+			torch.ones(1, device=torch.device('cuda', i)).add_(1)
+			torch.cuda.synchronize(i)
+			out.append((i, None))
+		except Exception as e:  # noqa: BLE001
+			out.append((i, f'{type(e).__name__}: {str(e).splitlines()[0]}'))
+	return out
+
+
 def _run_config(name: str, type_name: Optional[str], n_points: int, n_queries: int, k: int) -> bool:
 	"""Create the device for torch device `name` / slangpy `type_name`, run a k-NN, compare with the torch BVH."""
 	import time
@@ -476,9 +489,19 @@ def _run_config(name: str, type_name: Optional[str], n_points: int, n_queries: i
 		return False
 	finally:
 		config.SLANG_DEVICE_TYPE = saved
+		if torch.cuda.is_available():
+			health = _cuda_health()
+			print(
+				'    torch afterwards: '
+				+ ', '.join(f'cuda:{i} ' + ('ok' if e is None else f'BROKEN ({e})') for i, e in health)
+			)
+			if any(e is not None for _, e in health):
+				return False  # noqa: B012  (a broken context counts as a failure of this step)
 
 
-def diagnose(n_points: int = 20000, n_queries: int = 2000, k: int = 16, same_process: bool = False) -> int:
+def diagnose(
+	n_points: int = 20000, n_queries: int = 2000, k: int = 16, same_process: bool = False, pairs: bool = False
+) -> int:
 	"""
 	Print versions, adapters and NVRTC lookups, then for each torch device (cpu, every cuda:i) and slangpy device
 	type create the device, run a k-NN and compare it with the torch BVH, with full tracebacks. slang-rhi's own error
@@ -486,8 +509,10 @@ def diagnose(n_points: int = 20000, n_queries: int = 2000, k: int = 16, same_pro
 
 	Each configuration runs in its own Python process (also through interpreter exit, where the devices are closed),
 	so a crash is attributed to its configuration; same_process=True runs them all in this process, as a program
-	using several device types would. Returns the number of failed configurations.
-	Run: python -m points_as_tori.knn_slang [--same-process]
+	using several device types would; pairs=True runs every ordered pair of GPU configurations in a fresh process
+	(to find which combination breaks a CUDA context). After each step torch allocates and synchronizes on every GPU
+	("torch afterwards"). Returns the number of failed runs.
+	Run: python -m points_as_tori.knn_slang [--same-process | --pairs]
 	"""
 	import signal
 	import subprocess
@@ -497,23 +522,38 @@ def diagnose(n_points: int = 20000, n_queries: int = 2000, k: int = 16, same_pro
 	configs = [('cpu', None)]
 	for i in range(torch.cuda.device_count()):
 		configs += [(f'cuda:{i}', 'cuda'), (f'cuda:{i}', 'vulkan')]
-	failures = 0
-	for name, type_name in configs:
-		if same_process:
-			failures += not _run_config(name, type_name, n_points, n_queries, k)
-			continue
-		cmd = [sys.executable, '-m', 'points_as_tori.knn_slang', '--config', name, type_name or 'host']
+	if same_process:
+		return sum(not _run_config(name, type_name, n_points, n_queries, k) for name, type_name in configs)
+
+	def describe(sequence):
+		return ' then '.join(f'{n}/{t or "host"}' for n, t in sequence)
+
+	def run(sequence):
+		cmd = [sys.executable, '-m', 'points_as_tori.knn_slang']
+		for name, type_name in sequence:
+			cmd += ['--config', name, type_name or 'host']
 		cmd += ['--points', str(n_points), '--queries', str(n_queries), '-k', str(k)]
 		rc = subprocess.run(cmd).returncode
-		if rc != 0:
-			failures += 1
-			if rc < 0:
-				print(
-					f'    process killed by {signal.Signals(-rc).name} (after the output above; at exit if OK was printed)'
-				)
-			else:
-				print(f'    process exit code {rc}')
-	return failures
+		if rc < 0:
+			outcome = f'killed by {signal.Signals(-rc).name}'
+		else:
+			outcome = 'ok' if rc == 0 else 'FAILED'
+		print(f'    => {outcome}', flush=True)
+		return outcome
+
+	if pairs:
+		gpu_configs = [c for c in configs if c[1] is not None]
+		sequences = [(a, b) for a in gpu_configs for b in gpu_configs if a != b]
+	else:
+		sequences = [(c,) for c in configs]
+	results = []
+	for sequence in sequences:
+		print(f'=== {describe(sequence)}', flush=True)
+		results.append((sequence, run(sequence)))
+	print('=== summary')
+	for sequence, outcome in results:
+		print(f'{describe(sequence):44s} {outcome}')
+	return sum(outcome != 'ok' for _, outcome in results)
 
 
 def main(argv=None) -> int:
@@ -521,17 +561,22 @@ def main(argv=None) -> int:
 
 	ap = argparse.ArgumentParser(description='Diagnose the slangpy k-NN backend (see diagnose()).')
 	ap.add_argument('--same-process', action='store_true', help='run all configurations in one process')
+	ap.add_argument('--pairs', action='store_true', help='every ordered pair of GPU configurations, one process each')
 	ap.add_argument(
-		'--config', nargs=2, metavar=('DEVICE', 'TYPE'), help='run one configuration (TYPE: cuda|vulkan|host)'
+		'--config',
+		nargs=2,
+		action='append',
+		metavar=('DEVICE', 'TYPE'),
+		help='run these configurations in order in this process (TYPE: cuda|vulkan|host); repeatable',
 	)
 	ap.add_argument('--points', type=int, default=20000)
 	ap.add_argument('--queries', type=int, default=2000)
 	ap.add_argument('-k', type=int, default=16)
 	a = ap.parse_args(argv)
 	if a.config is not None:
-		name, type_name = a.config
-		return 0 if _run_config(name, None if type_name == 'host' else type_name, a.points, a.queries, a.k) else 1
-	return diagnose(a.points, a.queries, a.k, same_process=a.same_process)
+		ok = [_run_config(n, None if t == 'host' else t, a.points, a.queries, a.k) for n, t in a.config]
+		return 0 if all(ok) else 1
+	return diagnose(a.points, a.queries, a.k, same_process=a.same_process, pairs=a.pairs)
 
 
 if __name__ == '__main__':
