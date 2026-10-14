@@ -54,7 +54,8 @@ K_LIMIT = 1024  # largest k run by the kernel (per-thread arrays of BVH_K_MAX in
 QUERY_CHUNK = 1 << 20  # queries per dispatch, at most
 QUERY_CHUNK_ELEMENTS = 1 << 24  # (query, neighbor) output entries per dispatch, at most
 
-_DEVICES: dict = {}  # (device type, torch device or adapter) -> (spy.Device, spy.Module)
+_DEVICES: dict = {}  # (device type, torch device or adapter) -> (spy.Device, spy.Module), in creation order
+_CLOSE_REGISTERED = False
 
 
 def available() -> bool:
@@ -123,7 +124,32 @@ def get_device(torch_device: torch.device):
 			device = spy.create_device(type=device_type, include_paths=[SHADER_DIR], adapter_luid=adapter_luid)
 		module = spy.Module.load_from_file(device, 'knn.slang')
 		_DEVICES[key] = (device, module)
+		global _CLOSE_REGISTERED
+		if not _CLOSE_REGISTERED:
+			import atexit
+
+			atexit.register(close_devices)  # registered after slangpy's own atexit handler, so it runs first
+			_CLOSE_REGISTERED = True
 	return _DEVICES[key]
+
+
+def close_devices() -> None:
+	"""
+	Close the slangpy devices created here: synchronize torch on the GPUs they use, then close them in reverse
+	creation order, each with its GPU current. Runs at interpreter exit (atexit, before slangpy closes the remaining
+	devices in its own order); SlangKNN objects created before a call cannot be used after it.
+	"""
+	gpus = {where for _, where in _DEVICES if isinstance(where, str) and where.startswith('cuda')}
+	for where in sorted(gpus):
+		torch.cuda.synchronize(torch.device(where))
+	for key in reversed(list(_DEVICES)):
+		device, _ = _DEVICES.pop(key)
+		where = key[1]
+		if isinstance(where, str) and where.startswith('cuda'):
+			with torch.cuda.device(torch.device(where)):
+				device.close()
+		else:
+			device.close()
 
 
 def _round_up_pow2(x: int, lo: int) -> int:
@@ -383,17 +409,10 @@ def _report_nvrtc() -> None:
 		)
 
 
-def diagnose(n_points: int = 20000, n_queries: int = 2000, k: int = 16) -> int:
-	"""
-	Print versions, adapters, and for each torch device (cpu, every cuda:i) and slangpy device type the outcome of
-	creating the device and running a k-NN against the torch BVH, with full tracebacks. slang-rhi's own error lines
-	(e.g. the reason behind "Failed to create device!") are printed by slangpy to the terminal as they occur.
-	Returns the number of failed configurations.  Run: python -m points_as_tori.knn_slang
-	"""
+def _environment_report() -> None:
+	"""Versions, GPUs, slangpy adapters, NVRTC lookups (see diagnose)."""
 	import importlib.metadata
 	import platform
-	import time
-	import traceback
 
 	spy = _spy()
 
@@ -419,42 +438,101 @@ def diagnose(n_points: int = 20000, n_queries: int = 2000, k: int = 16) -> int:
 			print(f'slangpy {type_name} adapters: error {type(e).__name__}: {e}')
 	_report_nvrtc()
 
+
+def _run_config(name: str, type_name: Optional[str], n_points: int, n_queries: int, k: int) -> bool:
+	"""Create the device for torch device `name` / slangpy `type_name`, run a k-NN, compare with the torch BVH."""
+	import time
+	import traceback
+
+	label = f'{name} / slangpy {type_name or "vulkan (host copies)"}'
+	print(f'--- {label}', flush=True)
+	saved = config.SLANG_DEVICE_TYPE
+	config.SLANG_DEVICE_TYPE = type_name
+	try:
+		device = torch.device(name)
+		g = torch.Generator().manual_seed(0)
+		P = torch.randn(3, n_points, generator=g)
+		P = (P / P.norm(dim=0)).to(device)
+		Q = torch.randn(3, n_queries, generator=g).to(device)
+		t = time.perf_counter()
+		s = SlangKNN(P)
+		idx, dist = s.find_k_nearest(Q, k)
+		if device.type == 'cuda':
+			torch.cuda.synchronize(device)
+		t = time.perf_counter() - t
+		ref_idx, ref_dist = s.bvh.find_k_nearest(Q, k)
+		same = (idx.sort(dim=1).values == ref_idx.sort(dim=1).values).all(dim=1).float().mean().item()
+		err = (dist - ref_dist).abs().max().item()
+		sdev = s.device.info
+		print(
+			f'OK on {sdev.adapter_name} ({sdev.api_name}): {t:.2f} s incl. compile, same sets {same:.4f}, '
+			f'max |d - d_bvh| {err:.2e}',
+			flush=True,
+		)
+		return True
+	except Exception:  # noqa: BLE001
+		print(f'FAILED {label}')
+		traceback.print_exc()
+		return False
+	finally:
+		config.SLANG_DEVICE_TYPE = saved
+
+
+def diagnose(n_points: int = 20000, n_queries: int = 2000, k: int = 16, same_process: bool = False) -> int:
+	"""
+	Print versions, adapters and NVRTC lookups, then for each torch device (cpu, every cuda:i) and slangpy device
+	type create the device, run a k-NN and compare it with the torch BVH, with full tracebacks. slang-rhi's own error
+	lines are printed by slangpy to the terminal as they occur.
+
+	Each configuration runs in its own Python process (also through interpreter exit, where the devices are closed),
+	so a crash is attributed to its configuration; same_process=True runs them all in this process, as a program
+	using several device types would. Returns the number of failed configurations.
+	Run: python -m points_as_tori.knn_slang [--same-process]
+	"""
+	import signal
+	import subprocess
+	import sys
+
+	_environment_report()
 	configs = [('cpu', None)]
 	for i in range(torch.cuda.device_count()):
 		configs += [(f'cuda:{i}', 'cuda'), (f'cuda:{i}', 'vulkan')]
-	saved = config.SLANG_DEVICE_TYPE
 	failures = 0
 	for name, type_name in configs:
-		label = f'{name} / slangpy {type_name or "vulkan (host copies)"}'
-		print(f'--- {label}', flush=True)
-		config.SLANG_DEVICE_TYPE = type_name
-		try:
-			device = torch.device(name)
-			g = torch.Generator().manual_seed(0)
-			P = torch.randn(3, n_points, generator=g)
-			P = (P / P.norm(dim=0)).to(device)
-			Q = torch.randn(3, n_queries, generator=g).to(device)
-			t = time.perf_counter()
-			s = SlangKNN(P)
-			idx, dist = s.find_k_nearest(Q, k)
-			if device.type == 'cuda':
-				torch.cuda.synchronize(device)
-			t = time.perf_counter() - t
-			ref_idx, ref_dist = s.bvh.find_k_nearest(Q, k)
-			same = (idx.sort(dim=1).values == ref_idx.sort(dim=1).values).all(dim=1).float().mean().item()
-			err = (dist - ref_dist).abs().max().item()
-			sdev = s.device.info
-			print(
-				f'OK on {sdev.adapter_name} ({sdev.api_name}): {t:.2f} s incl. compile, same sets {same:.4f}, '
-				f'max |d - d_bvh| {err:.2e}'
-			)
-		except Exception:  # noqa: BLE001
+		if same_process:
+			failures += not _run_config(name, type_name, n_points, n_queries, k)
+			continue
+		cmd = [sys.executable, '-m', 'points_as_tori.knn_slang', '--config', name, type_name or 'host']
+		cmd += ['--points', str(n_points), '--queries', str(n_queries), '-k', str(k)]
+		rc = subprocess.run(cmd).returncode
+		if rc != 0:
 			failures += 1
-			print(f'FAILED {label}')
-			traceback.print_exc()
-	config.SLANG_DEVICE_TYPE = saved
+			if rc < 0:
+				print(
+					f'    process killed by {signal.Signals(-rc).name} (after the output above; at exit if OK was printed)'
+				)
+			else:
+				print(f'    process exit code {rc}')
 	return failures
 
 
+def main(argv=None) -> int:
+	import argparse
+
+	ap = argparse.ArgumentParser(description='Diagnose the slangpy k-NN backend (see diagnose()).')
+	ap.add_argument('--same-process', action='store_true', help='run all configurations in one process')
+	ap.add_argument(
+		'--config', nargs=2, metavar=('DEVICE', 'TYPE'), help='run one configuration (TYPE: cuda|vulkan|host)'
+	)
+	ap.add_argument('--points', type=int, default=20000)
+	ap.add_argument('--queries', type=int, default=2000)
+	ap.add_argument('-k', type=int, default=16)
+	a = ap.parse_args(argv)
+	if a.config is not None:
+		name, type_name = a.config
+		return 0 if _run_config(name, None if type_name == 'host' else type_name, a.points, a.queries, a.k) else 1
+	return diagnose(a.points, a.queries, a.k, same_process=a.same_process)
+
+
 if __name__ == '__main__':
-	raise SystemExit(diagnose())
+	raise SystemExit(main())

@@ -152,6 +152,12 @@ one dispatch per chunk of ≤ 2²⁰ queries, independent of the tree depth.
   `LD_LIBRARY_PATH`. The Vulkan device type compiles to SPIR-V without NVRTC. `python -m points_as_tori.knn_slang`
   prints the driver's CUDA version, the NVRTC each lookup resolves to, the headers slang-rhi finds, and stub
   directories on the loader path.
+- **Shutdown.** slangpy closes open devices in an `atexit` handler. A run that created CUDA devices and
+  Vulkan-interop devices on the same GPUs in one process passed every k-NN, then aborted at exit in slang-rhi
+  (`cuCtxSynchronize`: `CUDA_ERROR_OPERATING_SYSTEM` while releasing a CUDA device's command queue; cause not
+  established). `knn_slang.close_devices` (registered with `atexit` when the first device is created, so it runs
+  before slangpy's handler) synchronizes torch on the GPUs used and closes the devices in reverse creation order.
+  The diagnostic runs each configuration in its own process by default; `--same-process` reproduces the mixed case.
 - **Multi-GPU.** No masking needed: the slangpy device follows the torch device of the points (one slangpy device per
   torch device, cached). For Vulkan without torch, slang-rhi's default adapter is the first discrete GPU in Vulkan
   enumeration order, which need not be CUDA's device 0 (CUDA orders fastest first unless
