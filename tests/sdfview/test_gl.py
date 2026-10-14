@@ -238,7 +238,9 @@ def test_window(tmp_path, sphere, backend):
 	cmd = [sys.executable, str(script), path, backend]
 	if not os.environ.get('DISPLAY'):
 		cmd = ['xvfb-run', '-a', '-s', '-screen 0 640x480x24'] + cmd
-	res = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=REPO)
+	# the script runs from a temporary directory: make the repository importable whether or not it is pip-installed
+	env = dict(os.environ, PYTHONPATH=os.pathsep.join(filter(None, [REPO, os.environ.get('PYTHONPATH')])))
+	res = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=REPO, env=env)
 	assert res.returncode == 0, res.stdout[-2000:] + res.stderr[-2000:]
 	colors = int(res.stdout.split('distinct colors:')[1].split()[0])
 	print('\n' + [ln for ln in res.stdout.splitlines() if ln.startswith('title:')][0])
@@ -249,7 +251,10 @@ def test_cli(tmp_path, sphere, gl_ctx):
 	tdf, _ = sphere(torch.float32, n=500)
 	path = str(tmp_path / 's.sdfx')
 	scene_from_pat(tdf, k=16, bake_resolution=16).save(path)
-	run = lambda *a: subprocess.run([sys.executable, '-m', 'sdfview', *a], capture_output=True, text=True, cwd=REPO)  # noqa: E731
+	env = dict(os.environ, PYTHONPATH=os.pathsep.join(filter(None, [REPO, os.environ.get('PYTHONPATH')])))
+	run = lambda *a: subprocess.run(  # noqa: E731
+		[sys.executable, '-m', 'sdfview', *a], capture_output=True, text=True, cwd=REPO, env=env
+	)
 	res = run('info', path)
 	assert res.returncode == 0 and 'pat/bvh_nodes' in res.stdout, res.stderr
 	png = str(tmp_path / 'x.png')

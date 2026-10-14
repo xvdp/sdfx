@@ -46,6 +46,16 @@ else()
     target_compile_definitions(pat_reference PRIVATE PAT_REFERENCE_CGAL=0)
 endif()
 target_compile_options(pat_reference PRIVATE -w)
+# Bit-exact parity tests compare against IEEE double / float arithmetic in source order. Two build settings change the
+# original's results: FMA contraction of a*b + c (GCC's default -ffp-contract=fast whenever FMA instructions are
+# available: -march=native / haswell on x86-64, always on aarch64), and the vector width of FCPW's SIMD paths, which
+# follows -march. These options come after any -march / CXXFLAGS from the environment and override them.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(pat_reference PRIVATE -ffp-contract=off -fno-fast-math)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+        target_compile_options(pat_reference PRIVATE -march=x86-64 -mtune=generic)
+    endif()
+endif()
 if(OpenMP_CXX_FOUND)
     target_link_libraries(pat_reference PRIVATE OpenMP::OpenMP_CXX)
 endif()
