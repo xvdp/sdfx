@@ -52,7 +52,14 @@ Requirements (`pyproject.toml`): Python >= 3.9, torch >= 2.1, numpy, plyfile. Te
 | 3.11 | 2.1.2+cu121 | 1.26.4 | 28 pass; 13 reference tests skipped (JAX 0.8.2 needs Python >= 3.11) |
 
 ### Slang k-NN kernel (optional)
-`pip install -e ".[slang]"` adds slangpy. With `config.KNN_BACKEND = 'slang'` the k-nearest-neighbor
+```bash
+sudo apt update && sudo apt install libvulkan1
+pip install -e ".[slang]"` adds slangpy. 
+# optional, faster torch binding (C++ compiler needed, builds against your torch); 
+# without it slangpy uses a Python fallback, about microseconds per call here:
+pip install slangpy-torch --no-build-isolation
+```
+With `config.KNN_BACKEND = 'slang'` the k-nearest-neighbor
 searches run as one Slang kernel (one GPU thread per query) on the BVH of `points_as_tori.bvh`.
 CUDA tensors run on their own GPU (`cuda:N`); `config.SLANG_DEVICE_TYPE = 'vulkan'` uses Vulkan on
 that GPU. Tests: `pytest tests/points_as_tori/test_knn_slang.py`; timings:
