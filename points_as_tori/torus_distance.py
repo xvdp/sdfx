@@ -12,7 +12,8 @@ Nearest neighbors: nanoflann's kd-tree is replaced by one of three exact searche
   * a linear BVH built on the device (points_as_tori.bvh) traversed by all queries at once; O(|Q| · visited nodes),
     a host check every few traversal steps;
   * the same BVH traversed by a fused Slang kernel, one GPU thread per query (points_as_tori.knn_slang, 'slang').
-'auto' takes the BVH from config.KNN_BVH_MIN_POINTS points on.
+'auto': 'slang' on CUDA devices where slangpy is installed and the kernel runs (measured fastest at every size,
+PORT_NOTES.md), otherwise the BVH from config.KNN_BVH_MIN_POINTS points on, else brute force.
 
 Mathematics (per query q, neighbors i ∈ N(q), point p_i, torus T_i):
 
@@ -110,17 +111,58 @@ def _knn(
 	return torch.topk(d2, k, dim=1, largest=False, sorted=True).indices
 
 
-def _use_bvh(n_points: int) -> bool:
-	"""True if k-NN goes through a BVH (torch traversal or the Slang kernel), False for the brute force."""
+_SLANG_USABLE: dict = {}  # str(torch device) -> bool, for 'auto' (the first failure is reported once)
+
+
+def _slang_usable(device: torch.device) -> bool:
+	"""True if the Slang k-NN kernel can run on `device` (slangpy importable, device created); cached per device."""
+	key = str(device)
+	if key not in _SLANG_USABLE:
+		from . import knn_slang
+
+		ok = knn_slang.available()
+		if ok:
+			try:
+				knn_slang.get_device(device)
+			except Exception as e:  # noqa: BLE001  (no NVRTC / headers, driver, interop, ...)
+				import warnings
+
+				reason = str(e).splitlines()[0] if str(e) else type(e).__name__
+				warnings.warn(
+					f"config.KNN_BACKEND = 'auto': the Slang k-NN kernel is not usable on {device} ({reason}); "
+					'using the torch BVH / brute force. Details: python -m points_as_tori.knn_slang',
+					RuntimeWarning,
+					stacklevel=3,
+				)
+				ok = False
+		_SLANG_USABLE[key] = ok
+	return _SLANG_USABLE[key]
+
+
+def _knn_backend(n_points: int, device: torch.device) -> str:
+	"""
+	'brute', 'bvh' or 'slang' for a k-NN among n_points points on `device`: config.KNN_BACKEND, with 'auto' resolved
+	to 'slang' on CUDA devices where the kernel is usable, else 'bvh' from config.KNN_BVH_MIN_POINTS points on,
+	else 'brute'.
+	"""
 	backend = config.KNN_BACKEND
 	if backend not in ('auto', 'brute', 'bvh', 'slang'):
 		raise ValueError(f"config.KNN_BACKEND must be 'auto', 'brute', 'bvh' or 'slang', got {backend!r}")
-	return backend in ('bvh', 'slang') or (backend == 'auto' and n_points >= config.KNN_BVH_MIN_POINTS)
+	if backend != 'auto':
+		return backend
+	if device.type == 'cuda' and _slang_usable(device):
+		return 'slang'
+	return 'bvh' if n_points >= config.KNN_BVH_MIN_POINTS else 'brute'
+
+
+def _use_bvh(n_points: int, device: torch.device) -> bool:
+	"""True if k-NN goes through a BVH (torch traversal or the Slang kernel), False for the brute force."""
+	return _knn_backend(n_points, device) != 'brute'
 
 
 def _knn_searcher(points: torch.Tensor):
-	"""Object with find_k_nearest(queries, k) over points: points_as_tori.bvh.BVH, or knn_slang.SlangKNN for 'slang'."""
-	if config.KNN_BACKEND == 'slang':
+	"""Object with find_k_nearest(queries, k) over points: knn_slang.SlangKNN or points_as_tori.bvh.BVH."""
+	if _knn_backend(points.shape[1], points.device) == 'slang':
 		from .knn_slang import SlangKNN
 
 		return SlangKNN(points)
@@ -165,7 +207,7 @@ def get_neighbors(points: torch.Tensor, k_neighbors_: int, outliers=None) -> tor
 	k_neighbors = k_neighbors_ if (k_neighbors_ > 0 and k_neighbors_ < n_inliers) else n_inliers
 	neighbors = torch.empty((n_points, k_neighbors), dtype=torch.long, device=device)
 
-	if _use_bvh(n_inliers):
+	if _use_bvh(n_inliers, device):
 		# BVH over the inliers (as the C++ kd-tree over inlier_points), indices mapped back through idx_map
 		if exist_outliers:
 			idx_map = torch.as_tensor(np.setdiff1d(np.arange(n_points), outliers_host), dtype=torch.long, device=device)
@@ -194,7 +236,7 @@ def get_average_neighbor_distance(points: torch.Tensor, k_neighbors_: int) -> to
 	k_neighbors = k_neighbors_ if (k_neighbors_ > 0 and k_neighbors_ < n_points) else n_points
 
 	total_distance = torch.zeros((), dtype=points.dtype, device=points.device)
-	if _use_bvh(n_points):
+	if _use_bvh(n_points, points.device):
 		idx = _bvh_knn(points, points, k_neighbors)  # (|P|, k)
 		total_distance = norm(points[:, :, None] - points[:, idx]).sum()
 	else:
@@ -548,14 +590,14 @@ class TorusDistanceField:
 		return areas[None, :] if idx is None else areas[idx]
 
 	def _knn_bvh(self) -> bool:
-		return _use_bvh(self.n_points)
+		return _use_bvh(self.n_points, self.device)
 
 	def _get_bvh(self):
 		"""
 		BVH over all points (outliers included: they enter the neighbor search, not the sums), built once; a
-		knn_slang.SlangKNN when config.KNN_BACKEND == 'slang' (rebuilt if the backend changes).
+		knn_slang.SlangKNN when the k-NN backend resolves to 'slang' (rebuilt if the backend changes).
 		"""
-		backend = 'slang' if config.KNN_BACKEND == 'slang' else 'bvh'
+		backend = 'slang' if _knn_backend(self.n_points, self.device) == 'slang' else 'bvh'
 		if getattr(self, '_bvh', None) is None or getattr(self, '_bvh_backend', None) != backend:
 			self._bvh = _knn_searcher(self.points)
 			self._bvh_backend = backend

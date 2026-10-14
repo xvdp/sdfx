@@ -153,3 +153,39 @@ def test_evaluator_slang_backend(slang_device):
 	from points_as_tori.torus_distance import get_neighbors
 
 	check_exact(get_neighbors(tdf.points, 12), tdf.points, tdf.points, 12)
+
+
+def test_auto_backend_resolution(slang_device):
+	"""'auto': 'slang' on CUDA devices where the kernel runs, otherwise the size rule (BVH from KNN_BVH_MIN_POINTS)."""
+	from points_as_tori import torus_distance as td
+
+	config.KNN_BACKEND = 'auto'
+	expected_small = 'slang' if slang_device.type == 'cuda' else 'brute'
+	expected_large = 'slang' if slang_device.type == 'cuda' else 'bvh'
+	assert td._knn_backend(100, slang_device) == expected_small
+	assert td._knn_backend(config.KNN_BVH_MIN_POINTS, slang_device) == expected_large
+
+
+def test_auto_falls_back_when_slang_unusable(monkeypatch):
+	"""A device the kernel cannot use (e.g. NVRTC missing): 'auto' warns once and uses the size rule; explicit
+	'slang' raises. Runs without a GPU (device creation stubbed)."""
+	from points_as_tori import knn_slang
+	from points_as_tori import torus_distance as td
+
+	def fail(device):
+		raise RuntimeError('Failed to create device!\nmore lines')
+
+	monkeypatch.setattr(td, '_SLANG_USABLE', {})
+	monkeypatch.setattr(knn_slang, 'available', lambda: True)
+	monkeypatch.setattr(knn_slang, 'get_device', fail)
+	monkeypatch.setattr(config, 'KNN_BACKEND', 'auto')
+	cuda = torch.device('cuda', 0)
+	with pytest.warns(RuntimeWarning, match='Failed to create device!'):
+		assert td._knn_backend(100, cuda) == 'brute'
+	assert td._knn_backend(10**6, cuda) == 'bvh'  # cached: no second warning (pytest would flag an unexpected one)
+	monkeypatch.setattr(td, '_SLANG_USABLE', {})
+	monkeypatch.setattr(knn_slang, 'get_device', lambda device: None)
+	assert td._knn_backend(100, cuda) == 'slang'
+	assert td._knn_backend(100, torch.device('cpu')) == 'brute'
+	monkeypatch.setattr(config, 'KNN_BACKEND', 'slang')
+	assert td._knn_backend(100, torch.device('cpu')) == 'slang'

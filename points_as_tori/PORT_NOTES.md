@@ -66,7 +66,7 @@ Per query q with neighbors N(q), oriented points p_i, and tori (c_i, a_i, R_i, r
    - `'brute'`: one GEMM for squared distances, then `topk` per query chunk; O(|Q||P|).
    - `'bvh'`: the BVH of `bvh.py`, traversed by all queries at once; O(|Q| · visited nodes).
    - `'slang'`: the same BVH traversed by a fused Slang kernel (`knn_slang.py`), one GPU thread per query; needs slangpy. Neighbors selected with float32 distances.
-   - `'auto'` (default): `'bvh'` from `config.KNN_BVH_MIN_POINTS` = 32768 points on (a CPU crossover; see "k-NN backends").
+   - `'auto'` (default): on CUDA devices `'slang'` when slangpy is installed and the kernel runs there (otherwise a warning, once); else `'bvh'` from `config.KNN_BVH_MIN_POINTS` = 32768 points on (a CPU crossover), else `'brute'` (see "k-NN backends").
    Distances that enter the SDF are recomputed exactly from the gathered differences. `'brute'` and `'bvh'` return the C++ neighbors (tested) and give bitwise-identical evaluator output; `'slang'` returns the exact neighbors up to float32 near-ties (tested against float64 k-NN distances) and evaluator output equal to `'bvh'` within 1e-9 relative.
 2. **Radius evaluation** is dense over all points, masked to |q − p| < r. The k-NN fallback is computed for every query and selected per query.
 3. **`set_radius_evaluation` / `set_lambda_scale`** round their argument through float32, because the C++ setters take `float`. Without this, results differ at the 1e-9 level; with it they agree to 1e-15.
@@ -113,6 +113,35 @@ Per query q with neighbors N(q), oriented points p_i, and tori (c_i, a_i, R_i, r
 - **Shape of the BVH traversal.** 112-200 iterations of 88 torch ops each (N = 2k-1M, 100k queries), i.e. 10-18k small kernels per call, about independent of N. On a GPU this is launch-bound (~10 µs per launch: ~0.1-0.2 s per call) rather than work-bound; not measured here (no GPU).
 - **On CPU** compiled trees (scipy, nanoflann) are 10-100× faster than any torch method: the torch traversal pays Python-level iteration and per-op overhead. The `'auto'` threshold (32768 points) is the measured CPU crossover between torch brute force and the torch BVH.
 - **GPU:** run `python benchmarks/knn_bench.py --device cuda` (`--device cuda:1 --backends torch-bvh slang` for one GPU and some backends).
+
+**GPU** (`benchmarks/knn_bench.py`, torch 2.11.0+cu128, slangpy 0.43.0 CUDA device, float32; same workloads; seconds;
+"×" = a wrong k-th neighbor for some queries). Slang `heap` = default kernel, `scan` = GLSL-mirror kernel.
+
+| N | work | RTX A6000: torch brute | torch BVH (build) | Slang heap | Slang scan | TITAN RTX: torch BVH (build) | Slang heap | Slang scan |
+|---|---|---|---|---|---|---|---|---|
+| 2,048 | fit | 0.0006 | 0.163 (0.013) | 0.0007 | 0.0015 | 0.159 (0.011) | 0.0012 | 0.0019 |
+| 2,048 | eval | 0.025 | 0.144 (0.011) | 0.0040 | 0.0033 | 0.191 (0.011) | 0.0103 | 0.0075 |
+| 20,000 | fit | 0.044 | 0.181 (0.013) | 0.0025 | 0.0038 | 0.179 (0.013) | 0.0039 | 0.0080 |
+| 20,000 | eval | 0.218 × | 0.165 (0.013) | 0.0050 | 0.0047 | 0.212 (0.013) | 0.0093 | 0.0110 |
+| 100,000 | fit | 1.05 × | 0.351 (0.015) | 0.018 | 0.026 | 0.490 (0.016) | 0.036 | 0.055 |
+| 100,000 | eval | 1.04 × | 0.215 (0.014) | 0.0071 | 0.0068 | 0.266 (0.014) | 0.0137 | 0.0163 |
+| 1,000,000 | fit | 171 × | 3.17 (0.035) | 0.210 | 0.279 | 4.51 (0.045) | 0.421 | 0.596 |
+| 1,000,000 | eval | 17.0 × | 0.399 (0.035) | 0.0115 | 0.0107 | 0.500 (0.046) | 0.0218 | 0.0278 |
+
+- **Slang vs the torch traversal:** 15-230× faster (A6000), 12-40× (TITAN RTX). The torch BVH's floor of ~0.15 s at
+  small N is the launch-bound cost estimated above (~10-18k small kernels per call). The Slang BVH upload ("setup")
+  is ≤ 1 ms; the BVH build (torch, 11-46 ms) is shared.
+- **Slang vs brute force:** equal at N = 2048 fit (0.6-0.7 ms), faster everywhere else (6-800×); the brute force also
+  returned wrong k-th neighbors from N = 20k (float32 GEMM cancellation).
+- **heap vs scan:** heap faster at k = 64 (fit: 1.3-2.1×); at k = 32 (eval) within -27% … +22% (scan faster on the
+  A6000 by 4-20% and on the TITAN RTX at N = 2048; heap faster on the TITAN RTX from 20k). The heap stays the default
+  for every k: at most 27% slower, up to 2.1× faster.
+- **'auto' on CUDA = 'slang'** follows from these rows (fastest or equal at every size). Without slangpy, or when the
+  kernel cannot run on the device, 'auto' keeps the size rule: on GPU the torch brute force beats the torch BVH up to
+  N = 20k fit and loses from 20k eval, so the CPU crossover (32768) also lies within the GPU's measured range.
+- **float64 configurations:** 'slang' selects neighbors with float32 distances; distances are then recomputed in
+  float64. Neighbor sets can differ from the float64 ones only at float32 near-ties, where the blend weight of the
+  k-th neighbor is ~e⁻⁶⁴ of the nearest's. For neighbor sets equal to the C++ ones set `config.KNN_BACKEND = 'bvh'`.
 
 ### Fused Slang kernel (`knn_slang.py`, `slang/*.slang`)
 

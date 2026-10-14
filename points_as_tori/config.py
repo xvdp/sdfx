@@ -32,9 +32,12 @@ CHUNK_ELEMENTS: int = 1 << 21
 #   'bvh'    traversal of a linear BVH built on the device (points_as_tori.bvh): O(Q·visited nodes), many small kernels;
 #   'slang'  the same BVH traversed by a fused Slang kernel, one GPU thread per query (points_as_tori.knn_slang; needs
 #            slangpy); float32 distances;
-#   'auto'   'bvh' when the point cloud has at least KNN_BVH_MIN_POINTS points, else 'brute'.
-# All return the exact k nearest neighbors (up to ties; 'brute' and 'slang' in float32 up to float32 rounding). The
-# threshold is from CPU measurements (PORT_NOTES.md); measure on a GPU with benchmarks/knn_bench.py.
+#   'auto'   on CUDA: 'slang' if slangpy is installed and the kernel runs on the device (otherwise a warning, once);
+#            else 'bvh' when the point cloud has at least KNN_BVH_MIN_POINTS points, else 'brute'.
+# All return the exact k nearest neighbors up to ties; 'slang' selects with float32 distances (sets equal the float64
+# ones except where two distances differ by less than float32 rounding), 'brute' with a float32 GEMM (cancellation:
+# wrong sets measured from N = 20k on GPU). Measurements: PORT_NOTES.md, benchmarks/knn_bench.py. For float64
+# neighbor sets equal to the C++ ones on CUDA, set 'bvh'.
 KNN_BACKEND: str = 'auto'
 KNN_BVH_MIN_POINTS: int = 32768
 
