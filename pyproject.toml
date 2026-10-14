@@ -26,6 +26,7 @@ slang = ["slangpy>=0.43"]
 view = ["moderngl>=5.8", "moderngl-window>=3.0", "pyglet>=2.0"]
 # parity references for the tests: the original JAX code and the original C++ (built from tests/points_as_tori/reference)
 reference = ["jax==0.8.2", "flax==0.12.2", "optax", "nanobind", "matplotlib"]
+# can toml see if the machine has cuda and what version and then install pip install -U "jax[cuda12]" for example? 
 
 [tool.setuptools.packages.find]
 include = ["points_as_tori*", "sdfview*"]
