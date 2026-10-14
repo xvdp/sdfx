@@ -98,6 +98,12 @@ def get_device(torch_device: torch.device):
 		if torch_device.type == 'cuda':
 			if not spy.is_torch_bridge_available():
 				spy.set_allow_torch_fallback(True)
+			if type_name != 'cuda':
+				# A CUDA context created after a Vulkan device with CUDA interop exists was later unusable
+				# (CUDA_ERROR_OPERATING_SYSTEM; measured on 2 GPUs, slangpy 0.43.0, see PORT_NOTES.md "Context
+				# order"). Create torch's (primary) context on every GPU before the first interop device.
+				for i in range(torch.cuda.device_count()):
+					torch.empty(1, device=torch.device('cuda', i))
 			# create_torch_device takes the calling thread's current CUDA context (cuCtxGetCurrent); its own
 			# `with torch.device(...)` only sets the default device of tensor factories, and torch creates contexts
 			# lazily. Make this GPU current and its primary context exist (one allocation) before creating.

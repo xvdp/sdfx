@@ -152,12 +152,17 @@ one dispatch per chunk of ≤ 2²⁰ queries, independent of the tree depth.
   `LD_LIBRARY_PATH`. The Vulkan device type compiles to SPIR-V without NVRTC. `python -m points_as_tori.knn_slang`
   prints the driver's CUDA version, the NVRTC each lookup resolves to, the headers slang-rhi finds, and stub
   directories on the loader path.
-- **Shutdown.** slangpy closes open devices in an `atexit` handler. A run that created CUDA devices and
-  Vulkan-interop devices on the same GPUs in one process passed every k-NN, then aborted at exit in slang-rhi
-  (`cuCtxSynchronize`: `CUDA_ERROR_OPERATING_SYSTEM` while releasing a CUDA device's command queue; cause not
-  established). `knn_slang.close_devices` (registered with `atexit` when the first device is created, so it runs
-  before slangpy's handler) synchronizes torch on the GPUs used and closes the devices in reverse creation order.
-  The diagnostic runs each configuration in its own process by default; `--same-process` reproduces the mixed case.
+- **Context order (Vulkan interop, several GPUs).** Measured on a TITAN RTX + RTX A6000, slangpy 0.43.0: a GPU's
+  CUDA context created after a Vulkan device with CUDA interop exists in the process (on another GPU) was later
+  unusable, `CUDA_ERROR_OPERATING_SYSTEM` (304): slang-rhi's `cuCtxSynchronize` aborted the process when a CUDA
+  device using that context was closed at exit, and in a longer run (pytest) every torch call on that GPU failed.
+  All 12 ordered pairs of {CUDA, Vulkan} × {GPU 0, GPU 1} (`python -m points_as_tori.knn_slang --pairs`) and the
+  runs in one process fit this rule; contexts created before the interop device were unaffected, and same-GPU
+  combinations passed. Mechanism not established (driver or slangpy). `get_device` therefore creates torch's
+  context on every GPU before the first Vulkan-interop device. `knn_slang.close_devices` (atexit, before slangpy's
+  own handler) synchronizes torch on the GPUs used and closes the devices in reverse creation order. The diagnostic
+  runs each configuration in its own process by default; `--same-process` and `--pairs` test combinations, and
+  after each step torch allocates and synchronizes on every GPU ("torch afterwards").
 - **Multi-GPU.** No masking needed: the slangpy device follows the torch device of the points (one slangpy device per
   torch device, cached). For Vulkan without torch, slang-rhi's default adapter is the first discrete GPU in Vulkan
   enumeration order, which need not be CUDA's device 0 (CUDA orders fastest first unless
