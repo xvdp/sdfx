@@ -128,14 +128,15 @@ Per query q with neighbors N(q), oriented points p_i, and tori (c_i, a_i, R_i, r
 | 1,000,000 | fit | 171 × | 3.17 (0.035) | 0.210 | 0.279 | 4.51 (0.045) | 0.421 | 0.596 |
 | 1,000,000 | eval | 17.0 × | 0.399 (0.035) | 0.0115 | 0.0107 | 0.500 (0.046) | 0.0218 | 0.0278 |
 
-- **Slang vs the torch traversal:** 15-230× faster (A6000), 12-40× (TITAN RTX). The torch BVH's floor of ~0.15 s at
+- **Slang vs the torch traversal:** 15-230× faster (A6000), 11-130× (TITAN RTX). The torch BVH's floor of ~0.15 s at
   small N is the launch-bound cost estimated above (~10-18k small kernels per call). The Slang BVH upload ("setup")
   is ≤ 1 ms; the BVH build (torch, 11-46 ms) is shared.
-- **Slang vs brute force:** equal at N = 2048 fit (0.6-0.7 ms), faster everywhere else (6-800×); the brute force also
-  returned wrong k-th neighbors from N = 20k (float32 GEMM cancellation).
-- **heap vs scan:** heap faster at k = 64 (fit: 1.3-2.1×); at k = 32 (eval) within -27% … +22% (scan faster on the
-  A6000 by 4-20% and on the TITAN RTX at N = 2048; heap faster on the TITAN RTX from 20k). The heap stays the default
-  for every k: at most 27% slower, up to 2.1× faster.
+- **Slang vs brute force (A6000):** equal at N = 2048 fit (0.6-0.7 ms), 6-1500× faster everywhere else; the brute
+  force also returned wrong k-th neighbors from N = 20k (float32 GEMM cancellation).
+- **heap vs scan:** heap faster at k = 64 (fit: 1.3-2.1×). At k = 32 (eval) the heap / scan time ratio is
+  0.78-1.37: scan faster on the A6000 (by 4-21%) and on the TITAN RTX at N = 2048 (heap 1.37×), heap faster on the
+  TITAN RTX from 20k (scan 1.18-1.28×). The heap stays the default for every k: at most 1.37× slower, up to 2.1×
+  faster.
 - **'auto' on CUDA = 'slang'** follows from these rows (fastest or equal at every size). Without slangpy, or when the
   kernel cannot run on the device, 'auto' keeps the size rule: on GPU the torch brute force beats the torch BVH up to
   N = 20k fit and loses from 20k eval, so the CPU crossover (32768) also lies within the GPU's measured range.
