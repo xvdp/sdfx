@@ -97,7 +97,14 @@ def get_device(torch_device: torch.device):
 		if torch_device.type == 'cuda':
 			if not spy.is_torch_bridge_available():
 				spy.set_allow_torch_fallback(True)
-			device = spy.create_torch_device(type=device_type, torch_device=torch_device, include_paths=[SHADER_DIR])
+			# create_torch_device takes the calling thread's current CUDA context (cuCtxGetCurrent); its own
+			# `with torch.device(...)` only sets the default device of tensor factories, and torch creates contexts
+			# lazily. Make this GPU current and its primary context exist (one allocation) before creating.
+			with torch.cuda.device(torch_device):
+				torch.empty(1, device=torch_device)
+				device = spy.create_torch_device(
+					type=device_type, torch_device=torch_device, include_paths=[SHADER_DIR]
+				)
 		else:
 			adapter_luid = None
 			if config.SLANG_ADAPTER is not None:
@@ -168,7 +175,12 @@ class SlangKNN:
 			out_i = torch.full((m, k), -1, dtype=torch.int32, device=self.torch_device)
 			out_d = torch.zeros((m, k), dtype=torch.float32, device=self.torch_device)
 			qs = q.T.contiguous()
-		fn(spy.call_id(), qs, a['bvh_bounds'], a['bvh_nodes'], a['bvh_prims'], a['points'], k, out_i, out_d)
+		args = (spy.call_id(), qs, a['bvh_bounds'], a['bvh_nodes'], a['bvh_prims'], a['points'], k, out_i, out_d)
+		if self.on_host:
+			fn(*args)
+		else:
+			with torch.cuda.device(self.torch_device):  # this GPU's context current during the call
+				fn(*args)
 		if self.on_host:
 			out_i = torch.from_numpy(out_i.to_numpy()).to(self.torch_device)
 			out_d = torch.from_numpy(out_d.to_numpy()).to(self.torch_device)
@@ -213,3 +225,79 @@ def knn(queries: torch.Tensor, points: torch.Tensor, k: int, searcher: Optional[
 	"""(3, Q) queries -> (Q, k) indices of the k nearest points (3, N), nearest first."""
 	searcher = SlangKNN(points) if searcher is None else searcher
 	return searcher.find_k_nearest(queries, k)[0]
+
+
+def diagnose(n_points: int = 20000, n_queries: int = 2000, k: int = 16) -> int:
+	"""
+	Print versions, adapters, and for each torch device (cpu, every cuda:i) and slangpy device type the outcome of
+	creating the device and running a k-NN against the torch BVH, with full tracebacks. slang-rhi's own error lines
+	(e.g. the reason behind "Failed to create device!") are printed by slangpy to the terminal as they occur.
+	Returns the number of failed configurations.  Run: python -m points_as_tori.knn_slang
+	"""
+	import importlib.metadata
+	import platform
+	import time
+	import traceback
+
+	spy = _spy()
+
+	def version(name):
+		try:
+			return importlib.metadata.version(name)
+		except importlib.metadata.PackageNotFoundError:
+			return 'not installed'
+
+	print(f'python {platform.python_version()}, torch {torch.__version__} (CUDA {torch.version.cuda})')
+	print(f'slangpy {version("slangpy")}, slangpy-torch {version("slangpy-torch")}')
+	print(f'torch bridge available: {spy.is_torch_bridge_available()}', end='')
+	if hasattr(spy, 'get_torch_bridge_fallback_reason') and not spy.is_torch_bridge_available():
+		print(f' (fallback reason: {spy.get_torch_bridge_fallback_reason()})', end='')
+	print()
+	for i in range(torch.cuda.device_count()):
+		print(f'torch cuda:{i}: {torch.cuda.get_device_name(i)}')
+	for type_name in ('cuda', 'vulkan'):
+		try:
+			adapters = spy.Device.enumerate_adapters(getattr(spy.DeviceType, type_name))
+			print(f'slangpy {type_name} adapters: {[a.name for a in adapters]}')
+		except Exception as e:  # noqa: BLE001
+			print(f'slangpy {type_name} adapters: error {type(e).__name__}: {e}')
+
+	configs = [('cpu', None)]
+	for i in range(torch.cuda.device_count()):
+		configs += [(f'cuda:{i}', 'cuda'), (f'cuda:{i}', 'vulkan')]
+	saved = config.SLANG_DEVICE_TYPE
+	failures = 0
+	for name, type_name in configs:
+		label = f'{name} / slangpy {type_name or "vulkan (host copies)"}'
+		print(f'--- {label}', flush=True)
+		config.SLANG_DEVICE_TYPE = type_name
+		try:
+			device = torch.device(name)
+			g = torch.Generator().manual_seed(0)
+			P = torch.randn(3, n_points, generator=g)
+			P = (P / P.norm(dim=0)).to(device)
+			Q = torch.randn(3, n_queries, generator=g).to(device)
+			t = time.perf_counter()
+			s = SlangKNN(P)
+			idx, dist = s.find_k_nearest(Q, k)
+			if device.type == 'cuda':
+				torch.cuda.synchronize(device)
+			t = time.perf_counter() - t
+			ref_idx, ref_dist = s.bvh.find_k_nearest(Q, k)
+			same = (idx.sort(dim=1).values == ref_idx.sort(dim=1).values).all(dim=1).float().mean().item()
+			err = (dist - ref_dist).abs().max().item()
+			sdev = s.device.info
+			print(
+				f'OK on {sdev.adapter_name} ({sdev.api_name}): {t:.2f} s incl. compile, same sets {same:.4f}, '
+				f'max |d - d_bvh| {err:.2e}'
+			)
+		except Exception:  # noqa: BLE001
+			failures += 1
+			print(f'FAILED {label}')
+			traceback.print_exc()
+	config.SLANG_DEVICE_TYPE = saved
+	return failures
+
+
+if __name__ == '__main__':
+	raise SystemExit(diagnose())

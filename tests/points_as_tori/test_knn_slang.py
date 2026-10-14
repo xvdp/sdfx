@@ -38,7 +38,7 @@ def slang_device(request):
 		knn_slang.get_device(device)
 	except Exception as e:  # no Vulkan driver / adapter, CUDA interop unsupported, ...
 		config.SLANG_DEVICE_TYPE = saved[0]
-		pytest.skip(f'no slangpy device for {request.param}: {e}')
+		pytest.skip(f'no slangpy device for {request.param}: {e} (details: python -m points_as_tori.knn_slang)')
 	config.set_device(device, torch.float64, force=True)
 	yield device
 	config.SLANG_DEVICE_TYPE, config.KNN_BACKEND = saved
