@@ -12,13 +12,14 @@ sdfview/
   accel/lbvh.py            re-export of the LBVH builder in points_as_tori/bvh.py (port of the original bvh.cpp)
   sources/pat.py           PointsAsTori -> scene (points, tori, BVH, point cloud, optional grid bake)
   sources/grid.py          any torch SDF -> regular grid, in z-slabs
+  sources/superfit.py      SuperFit primitive assembly (superfit_sdf) -> grid-baked scene
   shaders/__init__.py      GLSL assembly: version header per target (gl330 | webgl2) + #include resolution
   shaders/glsl/            modules: common, bvh, field_pat, field_grid, field, camera, colormap
                            programs: fullscreen.vert, surface.frag, cutplane.{vert,frag}, points.{vert,frag},
                            probe.frag, probe_knn.frag, blit.frag
   backends/moderngl/       Renderer (any moderngl context), headless (EGL), window (moderngl-window)
   web/scene.js             scene reader for the browser / Node
-  __main__.py              CLI: pat | view | render | info
+  __main__.py              CLI: pat | superfit | view | render | info
 ```
 
 Second pass (planned, same module names so files compare one to one):
