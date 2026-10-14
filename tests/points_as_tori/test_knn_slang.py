@@ -73,13 +73,14 @@ def check_exact(idx, Q, P, k):
 	return err
 
 
+@pytest.mark.parametrize('variant', ['heap', 'scan'])
 @pytest.mark.parametrize('k', [1, 7, 32, 100])
-def test_knn_exact_float64(slang_device, k):
+def test_knn_exact_float64(slang_device, k, variant):
 	from points_as_tori.knn_slang import SlangKNN
 
 	P = pat.as_wide(cloud(4000, seed=1), 3)
 	Q = pat.as_wide(np.random.default_rng(2).normal(size=(3000, 3)), 3)
-	s = SlangKNN(P)
+	s = SlangKNN(P, variant=variant)
 	idx, dist = s.find_k_nearest(Q, k)
 	check_exact(idx, Q, P, k)
 	# distances in the queries' dtype, recomputed from the indices, nearest first up to float32 order

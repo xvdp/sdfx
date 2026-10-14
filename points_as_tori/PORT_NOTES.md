@@ -108,7 +108,7 @@ Per query q with neighbors N(q), oriented points p_i, and tori (c_i, a_i, R_i, r
 | 1,000,000 | fit | — | 144 (0.90) | 24.7 | — | — | 5.69 | 9.27 |
 | 1,000,000 | eval | — | 6.17 (1.21) | 0.64 | — | — | 1.35 | — |
 
-- **Slang kernel column:** the same CPU, through Mesa's lavapipe (software Vulkan, LLVM-compiled SIMD) since there is no GPU here: a measurement of the kernel's work on this CPU, not of GPU speed. The BVH upload ("setup") was ≤ 0.09 s, the BVH build is the torch BVH's. Run-to-run variation on this machine ~25%. A variant with the held set kept sorted by insertion (d_k = last entry, no final sort) measured on lavapipe at N = 100k: fit −10%, eval (k = 32) +54%, k = 8 +26%; not adopted (GPU not measured).
+- **Slang kernel column:** the same CPU, through Mesa's lavapipe (software Vulkan, LLVM-compiled SIMD) since there is no GPU here: a measurement of the kernel's work on this CPU, not of GPU speed. The BVH upload ("setup") was ≤ 0.09 s, the BVH build is the torch BVH's. Run-to-run variation on this machine ~25%. A variant with the held set kept sorted by insertion (d_k = last entry, no final sort) measured on lavapipe at N = 100k: fit −10%, eval (k = 32) +54%, k = 8 +26%; not adopted (GPU not measured). The column is the 'scan' kernel (held set as an unsorted array, as the GLSL shader); the 'heap' kernel (max-heap as the original C++, now the default) measured on lavapipe: N = 20k fit 0.26 s (scan 0.45), eval 0.65 (scan 0.45); N = 100k fit 1.25 (scan 2.40), eval 0.57 (scan 0.52): about 2× faster at k = 64, 10-40% slower at k = 32. GPU: `--backends slang slang-scan`.
 - **Exactness.** Brute force and faiss's flat index compute |q|² + |p|² − 2 q·p in float32 (cancellation); measured separately (5000 queries, k = 32): a wrong neighbor set for 1 query at N = 100k and 58 queries (1.2%) at N = 1M, k-th distance too large by up to 8e-6 (mean k-th distance 2.1e-2). The BVH, KeOps (differences) and kd-trees returned the exact sets. In the SDF the k-th neighbor's weight is ~e^-64 of the nearest, so the effect on φ is below float32 resolution.
 - **Shape of the BVH traversal.** 112-200 iterations of 88 torch ops each (N = 2k-1M, 100k queries), i.e. 10-18k small kernels per call, about independent of N. On a GPU this is launch-bound (~10 µs per launch: ~0.1-0.2 s per call) rather than work-bound; not measured here (no GPU).
 - **On CPU** compiled trees (scipy, nanoflann) are 10-100× faster than any torch method: the torch traversal pays Python-level iteration and per-op overhead. The `'auto'` threshold (32768 points) is the measured CPU crossover between torch brute force and the torch BVH.
@@ -119,10 +119,14 @@ Per query q with neighbors N(q), oriented points p_i, and tori (c_i, a_i, R_i, r
 The torch traversal is launch-bound on a GPU (above). The kernel runs the whole traversal of one query in one thread:
 one dispatch per chunk of ≤ 2²⁰ queries, independent of the tree depth.
 
-- **Algorithm** (`slang/bvh.slang`, a function-by-function mirror of `sdfview/shaders/glsl/bvh.glsl`): depth-first,
-  nearer child first; a node is pruned when k points are held and dist²(q, box) > d_k², d_k the current k-th
-  distance; the held set is an unsorted array of k, a closer point replaces the farthest. `slang/knn.slang` then
-  insertion-sorts the k results by (distance, index) and writes row q. Exact: every point of a pruned box is at
+- **Algorithm** (`slang/bvh.slang`): depth-first, nearer child first; a node is pruned when k points are held and
+  dist²(q, box) > d_k², d_k the current k-th distance. Held set, two variants (`SlangKNN(..., variant=)`):
+  `'scan'` (`bvhKNearestNeighbors`, function-by-function mirror of `sdfview/shaders/glsl/bvh.glsl`): an unsorted
+  array of k, a closer point replaces the farthest found by an O(k) scan, d_k recomputed in O(k), insertion sort at
+  the end (O(k²)); `'heap'` (`bvhKNearestNeighborsHeap`, default, the original C++ `std::priority_queue`): a
+  max-heap on squared distance, d_k = root, replacement sifts down in O(log k), heapsort at the end (O(k log k)).
+  Per accepted candidate at k = 64: ~2k = 128 operations vs ~2 log₂k = 12. `slang/knn.slang` writes row q ordered by
+  (distance, index). Exact: every point of a pruned box is at
   distance ≥ dist(q, box) > d_k.
 - **Precision.** float32, distances from differences Σ (q_c − p_c)² (no |q|² + |p|² − 2 q·p cancellation). The
   returned set can differ from the float64 one only where two candidate distances differ by less than float32

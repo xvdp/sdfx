@@ -6,12 +6,16 @@ Why: the torch traversal (points_as_tori.bvh.BVH.find_k_nearest) advances every 
 traversal loop runs inside one kernel: one launch per chunk of queries, independent of the tree depth.
 
 Kernel (slang/knn.slang, slang/bvh.slang): bvhKNearestNeighbors is a function-by-function mirror of
-sdfview/shaders/glsl/bvh.glsl. Per query q:
+sdfview/shaders/glsl/bvh.glsl ('scan' variant); bvhKNearestNeighborsHeap keeps the held set as a max-heap like the
+original C++ BVH ('heap' variant, the default). Per query q:
   * depth-first traversal with a per-thread stack, nearer child first (children ordered by dist²(q, box));
   * a node is pruned when k points are held and dist²(q, box) > d_k², d_k = current k-th nearest distance
     (dist²(q, box) = |q - clamp(q, min, max)|², 0 inside);
-  * the held set is an unsorted array of k (index, distance); a closer point replaces the farthest one;
-  * afterwards the k results are insertion-sorted by (distance, index) and written to row q of the outputs.
+  * the held set: 'scan' an unsorted array of k (a closer point replaces the farthest, found by an O(k) scan, and
+    d_k is recomputed in O(k)); 'heap' a max-heap on squared distance (d_k = root, O(1); replacement sifts down,
+    O(log k));
+  * afterwards the k results are sorted by (distance, index) ('scan': insertion sort, 'heap': heapsort) and written
+    to row q of the outputs.
 The pruning is exact: every point in a pruned box is at distance ≥ the box distance > d_k. Distances are float32 and
 computed from differences, |q - p|² = Σ (q_c - p_c)², without the |q|² + |p|² - 2 q·p cancellation of the GEMM brute
 force, so the neighbor sets equal the float64 ones except where two candidate distances differ by less than float32
@@ -166,11 +170,18 @@ class SlangKNN:
 	"""
 	k nearest neighbors among points (3, N) through the fused Slang kernel; same interface as
 	points_as_tori.bvh.BVH.find_k_nearest. `bvh`: a points_as_tori.bvh.BVH over the same points (built if None).
+	`variant`: 'heap' (held set as a max-heap, as the original C++ BVH: O(log k) per accepted candidate) or 'scan'
+	(unsorted array, as the GLSL / demo shader: O(k) per accepted candidate). Same neighbors up to ties.
 	"""
 
-	def __init__(self, points: torch.Tensor, bvh=None):
+	VARIANTS = {'heap': 'knn', 'scan': 'knn_scan'}
+
+	def __init__(self, points: torch.Tensor, bvh=None, variant: str = 'heap'):
 		from .bvh import BVH
 
+		if variant not in self.VARIANTS:
+			raise ValueError(f'variant must be one of {list(self.VARIANTS)}, got {variant!r}')
+		self.variant = variant
 		self.points = points
 		self.bvh = BVH(points) if bvh is None else bvh
 		self.n_points = points.shape[1]
@@ -204,7 +215,8 @@ class SlangKNN:
 		"""(3, m) float32 queries -> (m, k) int32 indices, (m, k) float32 distances, on the torch device."""
 		spy = _spy()
 		m = q.shape[1]
-		fn = self.module.knn.constants({'BVH_K_MAX': k_max, 'BVH_STACK_SIZE': self.stack_size})
+		kernel = getattr(self.module, self.VARIANTS[self.variant])
+		fn = kernel.constants({'BVH_K_MAX': k_max, 'BVH_STACK_SIZE': self.stack_size})
 		a = self.arrays
 		if self.on_host:
 			out_i = spy.Tensor.from_numpy(self.device, np.full((m, k), -1, dtype=np.int32))
