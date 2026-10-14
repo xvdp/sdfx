@@ -145,8 +145,13 @@ one dispatch per chunk of ≤ 2²⁰ queries, independent of the tree depth.
   newer than the CUDA version the driver supports is rejected (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`, 222): point
   both lookups at a toolkit no newer than the driver, `export CUDA_PATH=/usr/local/cuda-X.Y` and
   `export LD_LIBRARY_PATH=/usr/local/cuda-X.Y/lib64:$LD_LIBRARY_PATH` before starting Python, or update the driver.
-  The Vulkan device type compiles to SPIR-V without NVRTC. `python -m points_as_tori.knn_slang` prints the driver's
-  CUDA version and the NVRTC each lookup resolves to.
+  slang-rhi also needs `cuda_runtime.h` in `<dir of libnvrtc.so>/../include`, `<dir>/../../include` or
+  `/usr/include`; `CUDA_HOME` (nvcc, torch extensions) is not read. Conda CUDA packages keep headers and libraries
+  under `$CONDA_PREFIX/targets/x86_64-linux/{include, lib}` (with `lib/libnvrtc.so` from `cuda-nvrtc-dev`), so there
+  `CUDA_PATH=$CONDA_PREFIX/targets/x86_64-linux`. `lib/stubs` directories hold link-time stubs and must not be on
+  `LD_LIBRARY_PATH`. The Vulkan device type compiles to SPIR-V without NVRTC. `python -m points_as_tori.knn_slang`
+  prints the driver's CUDA version, the NVRTC each lookup resolves to, the headers slang-rhi finds, and stub
+  directories on the loader path.
 - **Multi-GPU.** No masking needed: the slangpy device follows the torch device of the points (one slangpy device per
   torch device, cached). For Vulkan without torch, slang-rhi's default adapter is the first discrete GPU in Vulkan
   enumeration order, which need not be CUDA's device 0 (CUDA orders fastest first unless

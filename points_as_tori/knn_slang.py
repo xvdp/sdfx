@@ -285,28 +285,57 @@ def _rhi_nvrtc_dirs() -> list:
 	return dirs
 
 
-def _loaded_path(prefix: str) -> Optional[str]:
-	"""Path of a shared library mapped into this process whose file name starts with `prefix` (/proc/self/maps)."""
-	try:
-		with open('/proc/self/maps') as f:
-			for line in f:
-				path = line.split()[-1]
-				if os.path.basename(path).startswith(prefix):
-					return path
-	except OSError:
-		pass
+def _handle_path(lib) -> Optional[str]:
+	"""File a ctypes.CDLL handle was loaded from (glibc dlinfo RTLD_DI_LINKMAP)."""
+	import ctypes
+
+	class LinkMap(ctypes.Structure):
+		_fields_ = [('l_addr', ctypes.c_void_p), ('l_name', ctypes.c_char_p)]
+
+	for libc_name in (None, 'libdl.so.2'):  # dlinfo is in libc from glibc 2.34, in libdl before
+		try:
+			dlinfo = ctypes.CDLL(libc_name).dlinfo
+		except (OSError, AttributeError):
+			continue
+		link_map = ctypes.POINTER(LinkMap)()
+		if dlinfo(ctypes.c_void_p(lib._handle), 2, ctypes.byref(link_map)) == 0 and link_map:
+			return link_map.contents.l_name.decode()
 	return None
 
 
+def _rhi_cuda_include(nvrtc_path: str) -> Tuple[Optional[str], list]:
+	"""
+	slang-rhi's search for cuda_runtime.h next to the NVRTC it loaded (src/cuda/cuda-nvrtc.cpp): <dir>/../include,
+	<dir>/../../include, /usr/include, with <dir> the directory of libnvrtc.so (symlinks not resolved).
+	Returns (directory found or None, directories searched).
+	"""
+	lib_dir = os.path.dirname(nvrtc_path)
+	dirs = [
+		os.path.join(os.path.dirname(lib_dir), 'include'),
+		os.path.join(os.path.dirname(os.path.dirname(lib_dir)), 'include'),
+		'/usr/include',
+	]
+	for d in dirs:
+		if os.path.isfile(os.path.join(d, 'cuda_runtime.h')):
+			return d, dirs
+	return None, dirs
+
+
 def _report_nvrtc() -> None:
-	"""Print the driver's CUDA version and the NVRTC each lookup resolves to, flagging NVRTC newer than the driver."""
+	"""
+	Print the driver's CUDA version, the NVRTC each lookup resolves to and the CUDA headers slang-rhi finds; flag an
+	NVRTC newer than the driver, missing headers, and stub libraries on the loader path.
+	"""
 	driver = _cuda_driver_version()
 	print(f'CUDA driver: {"none" if driver is None else "supports CUDA %d.%d" % driver}')
-	print(f'CUDA_PATH: {os.environ.get("CUDA_PATH", "unset")}')
+	cuda_path = os.environ.get('CUDA_PATH')
+	print(
+		f'CUDA_PATH: {cuda_path or "unset"}   (CUDA_HOME: {os.environ.get("CUDA_HOME", "unset")}, not read by slang-rhi)'
+	)
 
 	def describe(path, version):
 		if version is None:
-			return f'{path} (did not load)'
+			return f'{path} (loads, but nvrtcVersion fails: a stub or broken library)'
 		text = f'{path}, NVRTC {version[0]}.{version[1]}'
 		if driver is not None and version > driver:
 			text += f'  <- newer than the driver (CUDA {driver[0]}.{driver[1]}): its PTX is rejected'
@@ -323,11 +352,35 @@ def _report_nvrtc() -> None:
 				print(f'  also available: {describe(candidate, _nvrtc_version(candidate))}')
 	if found is None:
 		print('slang-rhi NVRTC (device creation): no libnvrtc.so in its search directories')
-	version = _nvrtc_version('libnvrtc.so')
-	loaded = _loaded_path('libnvrtc.so') if version is not None else None
-	print(
-		f'Slang NVRTC (kernel compilation, dlopen libnvrtc.so): {describe(loaded, version) if version else "not found"}'
-	)
+	else:
+		include, searched = _rhi_cuda_include(found)
+		if include is not None:
+			print(f'slang-rhi CUDA headers: {include}')
+		else:
+			print(f'slang-rhi CUDA headers: cuda_runtime.h not found in {searched}  <- device creation fails')
+			if cuda_path:
+				targets = os.path.join(cuda_path, 'targets', 'x86_64-linux')
+				if os.path.isfile(os.path.join(targets, 'include', 'cuda_runtime.h')):
+					if os.path.isfile(os.path.join(targets, 'lib', 'libnvrtc.so')):
+						print(f'  conda layout: export CUDA_PATH={targets}  (lib/libnvrtc.so and include/ there)')
+					else:
+						print(f'  headers in {targets}/include, but no {targets}/lib/libnvrtc.so (cuda-nvrtc-dev)')
+
+	stubs = [d for d in os.environ.get('LD_LIBRARY_PATH', '').split(':') if os.path.basename(d.rstrip('/')) == 'stubs']
+	if stubs:
+		print(f'LD_LIBRARY_PATH holds stub directories {stubs}  <- link-time only; remove them for running')
+	import ctypes
+
+	try:
+		slang_nvrtc, error = _handle_path(ctypes.CDLL('libnvrtc.so')), None
+	except OSError as e:
+		slang_nvrtc, error = None, e
+	if slang_nvrtc is None:
+		print(f'Slang NVRTC (kernel compilation, dlopen libnvrtc.so): not loaded ({error})')
+	else:
+		print(
+			f'Slang NVRTC (kernel compilation, dlopen libnvrtc.so): {describe(slang_nvrtc, _nvrtc_version(slang_nvrtc))}'
+		)
 
 
 def diagnose(n_points: int = 20000, n_queries: int = 2000, k: int = 16) -> int:
