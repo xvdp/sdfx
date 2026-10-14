@@ -22,7 +22,8 @@ sdfview/
 ```
 
 Second pass (planned, same module names so files compare one to one):
-`shaders/slang/*.slang` (didactic parallel implementation), `shaders/wgsl/*.wgsl` (WebGPU),
+`shaders/slang/*.slang` (didactic parallel implementation; the BVH module exists as `points_as_tori/slang/bvh.slang`,
+a function-by-function mirror of `shaders/glsl/bvh.glsl` run as a torch k-NN kernel), `shaders/wgsl/*.wgsl` (WebGPU),
 `web/webgl2/`, `web/webgpu/`, `web/three/` (three.js adapter: a ShaderMaterial on a full-screen quad / plane fed
 with the same textures).
 
@@ -102,7 +103,7 @@ the analytic unit sphere: IoU > 0.97 at 96×72.
 ## Not done yet
 
 - WebGL2 / WebGPU / three.js front ends (`web/` has the scene reader only; the GLSL compiles as ES 3.00).
-- Slang / WGSL mirrors of the modules.
-- Batched torch k-NN through the LBVH (would replace the brute-force k-NN of the torch evaluator for large N).
+- Slang mirrors of the render modules (common and bvh exist in `points_as_tori/slang/`, with tensors in place of
+  textures); WGSL mirrors.
 - Radius-mode evaluation and point areas in the shader (the original's `bvhAccumulateInRadius`, `usePointAreas`).
 - Tori, normals and ground-truth mesh overlays of the original demo; GUI widgets (keyboard only).

@@ -260,19 +260,33 @@ def test_add_point_cloud_noise(cpu64):
 
 @pytest.fixture(scope='module')
 def original_mesh_data(original):
-	"""training/mesh_data.py of the original, with the downloader / archive packages stubbed (not used here)."""
+	"""
+	training/mesh_data.py of the original. noise, pyvista, pyfqmr and trimesh are required (skip otherwise); the
+	downloader / archive packages it imports at the top (thingi10k, py7zr, numpy-stl's `stl`) are not used here and
+	are stubbed when they are not installed. Stubs are removed afterwards.
+	"""
 	for name in ['noise', 'pyvista', 'pyfqmr', 'trimesh']:
 		pytest.importorskip(name)
-	for name in ['thingi10k', 'py7zr', 'stl']:
-		if name not in sys.modules and importlib.util.find_spec(name) is None:
+	stubbed = []
+	for name in ['thingi10k', 'py7zr', 'stl', 'stl.mesh']:
+		if name in sys.modules:
+			continue
+		try:
+			importlib.import_module(name)
+		except ImportError:
 			sys.modules[name] = types.ModuleType(name)
+			stubbed.append(name)
 	if not hasattr(sys.modules['stl'], 'mesh'):
-		sys.modules['stl'].mesh = types.ModuleType('stl.mesh')
+		sys.modules['stl'].mesh = sys.modules['stl.mesh']
 	path = os.path.join(REPO, 'ext', 'points-as-tori', 'training', 'mesh_data.py')
 	spec = importlib.util.spec_from_file_location('original_mesh_data', path)
 	module = importlib.util.module_from_spec(spec)
-	spec.loader.exec_module(module)
-	return module
+	try:
+		spec.loader.exec_module(module)
+		yield module
+	finally:
+		for name in stubbed:
+			sys.modules.pop(name, None)
 
 
 def test_blob_implicit_surface_matches_original(cpu64, original_mesh_data):

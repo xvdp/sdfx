@@ -82,12 +82,38 @@ def _compare_samples(label, port, cpp):
 	print(
 		f'  {label:42s} n={p.shape[1]:5d}  points max|Δ|={dp:.2e} (identical: {np.array_equal(p, cpp[0])})  normals max|Δ|={dn:.2e}'
 	)
-	assert np.array_equal(p, cpp[0]) and np.array_equal(n, cpp[1]), label
+	same = (p == cpp[0]).all(axis=0) & (n == cpp[1]).all(axis=0)
+	assert same.all(), (
+		f'{label}: {int(same.sum())} of {same.size} samples bit-identical, points max|Δ| {dp:.2e}, normals max|Δ| {dn:.2e}. '
+		'Bit parity assumes the reference was built with the flags of tests/points_as_tori/reference/CMakeLists.txt '
+		'(no FMA contraction, baseline x86-64); see test_box_bvh_replica_matches_cpp for the tree the box samplers use.'
+	)
 
 
 # ========================================================================
 # Geometry, I/O
 # ========================================================================
+
+
+@pytest.mark.parametrize('name', MESH_NAMES)
+def test_box_bvh_replica_matches_cpp(reference, cpu64, name):
+	"""
+	The samplers with a bounding box draw among the triangles of the original BVH's leaves (12-bin SAH build), so the
+	port rebuilds that tree on the host (_BoxQueryBVH). Node by node equality with the C++ BVH (get_gpu_data). The SAH
+	costs contain a + b·c terms: a C++ build that fuses them into FMA instructions (-ffp-contract=fast with FMA hardware,
+	e.g. -march=native, or aarch64) can split differently.
+	"""
+	from points_as_tori.shape_3d import _BoxQueryBVH
+
+	cpp, _ = _pair(reference, name)
+	V, F = cpp.get_vertices().T, cpp.get_faces().T
+	nodes, prims = reference.BVH(_f(V.T), np.asfortranarray(F.T.astype(np.int32))).get_gpu_data()
+	replica = _BoxQueryBVH(V, F.astype(np.int64))
+	ours = np.array([[*n[0], *n[1], n[2], n[3], n[4], n[5]] for n in replica.nodes])
+	assert ours.shape == nodes.shape, f'{name}: {len(ours)} nodes vs {len(nodes)} in the C++ BVH'
+	diff = np.flatnonzero(~(ours == nodes).all(axis=1))
+	assert diff.size == 0, f'{name}: {diff.size} of {len(nodes)} nodes differ from the C++ BVH, first at node {diff[0]}'
+	assert np.array_equal(np.asarray(replica.primitive_indices), prims)
 
 
 @pytest.mark.parametrize('name', MESH_NAMES)

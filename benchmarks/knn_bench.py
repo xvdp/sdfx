@@ -3,6 +3,7 @@ k-nearest-neighbor backends for Points as Tori, measured on the same data.
 
 	python benchmarks/knn_bench.py                               # CPU
 	python benchmarks/knn_bench.py --device cuda --sizes 1e4 1e5 1e6 4e6
+	python benchmarks/knn_bench.py --device cuda:1 --backends torch-bvh slang   # one GPU, some backends
 	PAT_REFERENCE_DIR=build/pat_reference python benchmarks/knn_bench.py   # adds the original C++ (nanoflann)
 
 Two workloads, as PAT uses them:
@@ -13,6 +14,10 @@ Backends (each runs only if importable; all exact except where noted):
 	torch-brute   points_as_tori brute force: GEMM distances + torch.topk, chunked (the port's 'brute')
 	torch-bvh     points_as_tori.bvh: linear BVH built with torch, batched stack traversal (the port's 'bvh'),
 	              build time reported separately
+	slang         points_as_tori.knn_slang: the same BVH, fused Slang kernel, one thread per query (the port's
+	              'slang'; needs slangpy); upload of the BVH arrays reported as 'slang setup', kernel compiled in the
+	              warm-up run. CUDA tensors: slangpy's CUDA device on torch's context; CPU tensors: a Vulkan device
+	              with host copies (config.SLANG_DEVICE_TYPE / SLANG_ADAPTER select others)
 	faiss         faiss IndexFlatL2 (exact brute force with fused k-selection; GPU: GpuIndexFlatL2, k ≤ 2048)
 	keops         pykeops LazyTensor argKmin (exact brute force, reduction fused in registers, no Q×N matrix)
 	pytorch3d     pytorch3d.ops.knn_points (exact brute-force CUDA kernel)
@@ -77,6 +82,10 @@ def torch_brute(P, Q, k):
 def backends(device):
 	out = {'torch-brute': lambda P, Q, k: torch_brute(P, Q, k)}
 	out['torch-bvh'] = None  # special-cased (build + query)
+	from points_as_tori import knn_slang
+
+	if knn_slang.available():
+		out['slang'] = None  # special-cased (reuses the torch-bvh BVH)
 	try:
 		import faiss
 
@@ -143,11 +152,16 @@ def main():
 	ap.add_argument('--queries', type=int, default=100_000)
 	ap.add_argument('--threads', type=int, default=os.cpu_count())
 	ap.add_argument('--max-brute', type=float, default=2e5, help='skip O(Q·N) backends above this N on CPU')
+	ap.add_argument('--backends', nargs='+', default=None, help='run only these backends (default: all importable)')
 	a = ap.parse_args()
 	torch.set_num_threads(a.threads)
 	pat.set_device(a.device, torch.float32)
 	device = config.get_device()
+	if device.type == 'cuda':
+		torch.cuda.set_device(device)  # torch.cuda.synchronize() and slangpy's context follow this device
 	bk = backends(device)
+	if a.backends is not None:
+		bk = {name: fn for name, fn in bk.items() if name in a.backends}
 	ref_mod = None
 	try:
 		sys.path.insert(0, os.environ.get('PAT_REFERENCE_DIR', os.path.join(REPO, 'build', 'pat_reference')))
@@ -161,6 +175,7 @@ def main():
 		for work, Q, k in (('fit', P, 64), ('eval', Qe, 32)):
 			row = {'N': n, 'work': work, 'Q': Q.shape[1], 'k': k}
 			kth = {}
+			bvh = None
 			for name, fn in bk.items():
 				brute_like = name in ('torch-brute', 'faiss', 'keops', 'pytorch3d')
 				if device.type == 'cpu' and brute_like and n > a.max_brute:
@@ -170,6 +185,13 @@ def main():
 						tb, bvh = timed(lambda: BVH(P), device, reps=1)
 						t, idx = timed(lambda: bvh.find_k_nearest(Q, k)[0], device, reps=1)
 						row['torch-bvh build'] = round(tb, 4)
+					elif name == 'slang':
+						from points_as_tori.knn_slang import SlangKNN
+
+						bvh = BVH(P) if bvh is None else bvh
+						ts, sk = timed(lambda: SlangKNN(P, bvh=bvh), device, reps=1)
+						t, idx = timed(lambda: sk.find_k_nearest(Q, k)[0], device, reps=2)
+						row['slang setup'] = round(ts, 4)
 					else:
 						t, idx = timed(lambda: fn(P, Q, k), device, reps=1)
 					row[name] = round(t, 4)

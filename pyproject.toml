@@ -20,16 +20,19 @@ train = ["matplotlib"]  # training-history plot (skipped when missing)
 test = ["pytest"]
 # training-data generation (points_as_tori.training.mesh_data): mesh downloads/archives and mesh simplification
 dataset = ["thingi10k", "py7zr", "numpy-stl", "pyfqmr"]
+# fused Slang k-NN kernel (config.KNN_BACKEND = 'slang'); slangpy-torch is optional (faster torch tensor binding)
+slang = ["slangpy>=0.43"]
 # viewer (sdfview): OpenGL 3.3 via moderngl; window via moderngl-window (pyglet backend by default, glfw optional)
 view = ["moderngl>=5.8", "moderngl-window>=3.0", "pyglet>=2.0"]
 # parity references for the tests: the original JAX code and the original C++ (built from tests/points_as_tori/reference)
 reference = ["jax==0.8.2", "flax==0.12.2", "optax", "nanobind", "matplotlib"]
+# can toml see if the machine has cuda and what version and then install pip install -U "jax[cuda12]" for example? 
 
 [tool.setuptools.packages.find]
 include = ["points_as_tori*", "sdfview*"]
 
 [tool.setuptools.package-data]
-points_as_tori = ["models/*.pt", "PORT_NOTES.md"]
+points_as_tori = ["models/*.pt", "slang/*.slang", "PORT_NOTES.md"]
 sdfview = ["shaders/glsl/*", "web/*.js", "NOTES.md"]
 
 [tool.pytest.ini_options]

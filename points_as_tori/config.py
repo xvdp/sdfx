@@ -30,11 +30,20 @@ CHUNK_ELEMENTS: int = 1 << 21
 # k-nearest-neighbor search (replaces the C++ nanoflann kd-tree):
 #   'brute'  distances to all points (one GEMM per chunk) + torch.topk: O(Q·N) work, few large kernels;
 #   'bvh'    traversal of a linear BVH built on the device (points_as_tori.bvh): O(Q·visited nodes), many small kernels;
+#   'slang'  the same BVH traversed by a fused Slang kernel, one GPU thread per query (points_as_tori.knn_slang; needs
+#            slangpy); float32 distances;
 #   'auto'   'bvh' when the point cloud has at least KNN_BVH_MIN_POINTS points, else 'brute'.
-# Both return the exact k nearest neighbors (up to ties). The threshold is from CPU measurements (PORT_NOTES.md);
-# measure on a GPU with benchmarks/knn_bench.py.
+# All return the exact k nearest neighbors (up to ties; 'brute' and 'slang' in float32 up to float32 rounding). The
+# threshold is from CPU measurements (PORT_NOTES.md); measure on a GPU with benchmarks/knn_bench.py.
 KNN_BACKEND: str = 'auto'
 KNN_BVH_MIN_POINTS: int = 32768
+
+# slangpy device type for the 'slang' backend: None = 'cuda' for CUDA tensors (shares torch's CUDA context) and
+# 'vulkan' for CPU tensors (arrays copied through the host; e.g. Mesa lavapipe when there is no GPU). 'vulkan' with
+# CUDA tensors runs on the same GPU through CUDA interop. SLANG_ADAPTER: substring of the adapter name to use for
+# devices not tied to a torch CUDA device (CPU tensors); None = slangpy's default (first discrete GPU).
+SLANG_DEVICE_TYPE: Optional[str] = None
+SLANG_ADAPTER: Optional[str] = None
 
 
 def set_device(device: Union[str, torch.device], dtype: torch.dtype = torch.float32, force: bool = False) -> None:
