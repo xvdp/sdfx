@@ -6,11 +6,12 @@ The C++ loops over queries (OpenMP) and, per query, over its neighbor list. Here
 shape (Q, K) and per-pair vectors (3, Q, K); reductions are sums over the last axis. When every point is a neighbor
 (k_evaluation <= 0 or >= |P|, and radius mode) the point arrays are broadcast as (3, 1, |P|) instead of gathered.
 
-Nearest neighbors: nanoflann's kd-tree is replaced by one of two exact searches (config.KNN_BACKEND):
+Nearest neighbors: nanoflann's kd-tree is replaced by one of three exact searches (config.KNN_BACKEND):
   * brute force: one GEMM for squared distances + torch.topk per chunk of queries; O(|Q| |P|) work, no host sync,
     chunks sized so that Q * |P| <= config.CHUNK_ELEMENTS;
   * a linear BVH built on the device (points_as_tori.bvh) traversed by all queries at once; O(|Q| · visited nodes),
-    a host check every few traversal steps.
+    a host check every few traversal steps;
+  * the same BVH traversed by a fused Slang kernel, one GPU thread per query (points_as_tori.knn_slang, 'slang').
 'auto' takes the BVH from config.KNN_BVH_MIN_POINTS points on.
 
 Mathematics (per query q, neighbors i ∈ N(q), point p_i, torus T_i):
@@ -110,17 +111,27 @@ def _knn(
 
 
 def _use_bvh(n_points: int) -> bool:
+	"""True if k-NN goes through a BVH (torch traversal or the Slang kernel), False for the brute force."""
 	backend = config.KNN_BACKEND
-	if backend not in ('auto', 'brute', 'bvh'):
-		raise ValueError(f"config.KNN_BACKEND must be 'auto', 'brute' or 'bvh', got {backend!r}")
-	return backend == 'bvh' or (backend == 'auto' and n_points >= config.KNN_BVH_MIN_POINTS)
+	if backend not in ('auto', 'brute', 'bvh', 'slang'):
+		raise ValueError(f"config.KNN_BACKEND must be 'auto', 'brute', 'bvh' or 'slang', got {backend!r}")
+	return backend in ('bvh', 'slang') or (backend == 'auto' and n_points >= config.KNN_BVH_MIN_POINTS)
+
+
+def _knn_searcher(points: torch.Tensor):
+	"""Object with find_k_nearest(queries, k) over points: points_as_tori.bvh.BVH, or knn_slang.SlangKNN for 'slang'."""
+	if config.KNN_BACKEND == 'slang':
+		from .knn_slang import SlangKNN
+
+		return SlangKNN(points)
+	from .bvh import BVH
+
+	return BVH(points)
 
 
 def _bvh_knn(queries: torch.Tensor, points: torch.Tensor, k: int, bvh=None) -> torch.Tensor:
 	"""(3, Q) queries -> (Q, k) indices of the k nearest points through a BVH (built if not given), nearest first."""
-	from .bvh import BVH
-
-	bvh = BVH(points) if bvh is None else bvh
+	bvh = _knn_searcher(points) if bvh is None else bvh
 	return bvh.find_k_nearest(queries, k)[0]
 
 
@@ -540,11 +551,14 @@ class TorusDistanceField:
 		return _use_bvh(self.n_points)
 
 	def _get_bvh(self):
-		"""BVH over all points (outliers included: they enter the neighbor search, not the sums), built once."""
-		if getattr(self, '_bvh', None) is None:
-			from .bvh import BVH
-
-			self._bvh = BVH(self.points)
+		"""
+		BVH over all points (outliers included: they enter the neighbor search, not the sums), built once; a
+		knn_slang.SlangKNN when config.KNN_BACKEND == 'slang' (rebuilt if the backend changes).
+		"""
+		backend = 'slang' if config.KNN_BACKEND == 'slang' else 'bvh'
+		if getattr(self, '_bvh', None) is None or getattr(self, '_bvh_backend', None) != backend:
+			self._bvh = _knn_searcher(self.points)
+			self._bvh_backend = backend
 		return self._bvh
 
 	def _require_tori(self):

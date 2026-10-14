@@ -11,6 +11,7 @@ Source: `ext/points-as-tori` (JAX/flax.nnx network + C++/nanobind evaluator), MI
 | `shape_3d.py` (section "2D SDFS") | `src/pointsastori/shape_3d.py` | Python wrappers `SDF2D` + subclasses (`bound_object` = the `shape_2d` class), `load_SDF`, `sample_SDF`, `SDF3D`, `SDF_SHAPES` |
 | `torus_distance.py` | `src/cpp/torus_distance.h/.cpp` | `TorusDistanceField` (evaluation, log-sum-exp variants, winding numbers, point areas, isosurface sampling), `get_neighbors`, `get_average_neighbor_distance`, torus fitting, torus SDF/gradient |
 | `bvh.py` | `src/cpp/bvh.h/.cpp`, `BoundingVolumeHierarchy` of `src/pointsastori/shape_3d.py` | `BVH` over points or triangles (LBVH build in torch, batched queries), `BoundingVolumeHierarchy` |
+| `knn_slang.py`, `slang/common.slang`, `slang/bvh.slang`, `slang/knn.slang` | `bvhKNearestNeighbors` of `demo/shaders_3d.py` (via `sdfview/shaders/glsl/bvh.glsl`) | `SlangKNN`: fused k-NN kernel in Slang, one thread per query, called through slangpy (the `'slang'` k-NN backend) |
 | `igl.py` | libigl `copyleft/cgal/point_areas`, `octree`, `fast_winding_number` (`deps/libigl`) | point areas, octree, Barnes-Hut winding number |
 | `isosurface.py` | `mesh_isocontour` of `demo/demo_3d.py` (PyVista) | marching cubes in torch, `mesh_isocontour` |
 | `cpp_random.py` | `std::mt19937` + libstdc++ distributions | bit-exact replay of the C++ random draws |
@@ -61,11 +62,12 @@ Per query q with neighbors N(q), oriented points p_i, and tori (c_i, a_i, R_i, r
 
 ## Deviations from the original
 
-1. **Nearest neighbors:** the nanoflann kd-tree is replaced by one of two exact searches, `config.KNN_BACKEND`:
+1. **Nearest neighbors:** the nanoflann kd-tree is replaced by one of three exact searches, `config.KNN_BACKEND`:
    - `'brute'`: one GEMM for squared distances, then `topk` per query chunk; O(|Q||P|).
    - `'bvh'`: the BVH of `bvh.py`, traversed by all queries at once; O(|Q| · visited nodes).
+   - `'slang'`: the same BVH traversed by a fused Slang kernel (`knn_slang.py`), one GPU thread per query; needs slangpy. Neighbors selected with float32 distances.
    - `'auto'` (default): `'bvh'` from `config.KNN_BVH_MIN_POINTS` = 32768 points on (a CPU crossover; see "k-NN backends").
-   Distances that enter the SDF are recomputed exactly from the gathered differences. Both backends return the C++ neighbors (tested) and give bitwise-identical evaluator output.
+   Distances that enter the SDF are recomputed exactly from the gathered differences. `'brute'` and `'bvh'` return the C++ neighbors (tested) and give bitwise-identical evaluator output; `'slang'` returns the exact neighbors up to float32 near-ties (tested against float64 k-NN distances) and evaluator output equal to `'bvh'` within 1e-9 relative.
 2. **Radius evaluation** is dense over all points, masked to |q − p| < r. The k-NN fallback is computed for every query and selected per query.
 3. **`set_radius_evaluation` / `set_lambda_scale`** round their argument through float32, because the C++ setters take `float`. Without this, results differ at the 1e-9 level; with it they agree to 1e-15.
 4. **`cartesian_to_rotation`** (C++ version) clamps z to [−1, 1] before `acos`; the original returns NaN when rounding pushes |z| above 1.
@@ -95,21 +97,51 @@ Per query q with neighbors N(q), oriented points p_i, and tori (c_i, a_i, R_i, r
 
 `benchmarks/knn_bench.py`, CPU (4 threads), float32, N points on the unit sphere. Workloads as PAT uses them: **fit** = every point's 64 nearest points (network input); **eval** = 32 nearest points of 100k queries near the surface (SDF evaluation). Seconds; "×" = returned a wrong k-th neighbor for some queries.
 
-| N | work | torch brute | torch BVH (build) | faiss flat | KeOps | scipy kd-tree | C++ nanoflann |
-|---|---|---|---|---|---|---|---|
-| 2,048 | fit | 0.012 | 0.43 (0.008) | 0.021 | 0.016 | 0.010 | 0.010 |
-| 2,048 | eval | 0.49 | 2.70 (0.007) | 0.48 | 0.32 | 0.094 | — |
-| 20,000 | fit | 0.65 | 1.39 (0.030) | 0.48 | 0.44 | 0.055 | 0.045 |
-| 20,000 | eval | 2.78 | 2.74 (0.031) | 2.15 × | 1.24 | 0.110 | — |
-| 100,000 | fit | 13.3 × | 10.2 (0.059) | 14.9 × | 5.85 | 0.29 | 0.28 |
-| 100,000 | eval | 13.8 × | 3.32 (0.077) | 14.1 × | 4.93 | 0.22 | — |
-| 1,000,000 | fit | — | 144 (0.90) | — | — | 5.69 | 9.27 |
-| 1,000,000 | eval | — | 6.17 (1.21) | — | — | 1.35 | — |
+| N | work | torch brute | torch BVH (build) | Slang kernel (lavapipe) | faiss flat | KeOps | scipy kd-tree | C++ nanoflann |
+|---|---|---|---|---|---|---|---|---|
+| 2,048 | fit | 0.012 | 0.43 (0.008) | 0.040 | 0.021 | 0.016 | 0.010 | 0.010 |
+| 2,048 | eval | 0.49 | 2.70 (0.007) | 0.43 | 0.48 | 0.32 | 0.094 | — |
+| 20,000 | fit | 0.65 | 1.39 (0.030) | 0.39 | 0.48 | 0.44 | 0.055 | 0.045 |
+| 20,000 | eval | 2.78 | 2.74 (0.031) | 0.35 | 2.15 × | 1.24 | 0.110 | — |
+| 100,000 | fit | 13.3 × | 10.2 (0.059) | 2.19 | 14.9 × | 5.85 | 0.29 | 0.28 |
+| 100,000 | eval | 13.8 × | 3.32 (0.077) | 0.44 | 14.1 × | 4.93 | 0.22 | — |
+| 1,000,000 | fit | — | 144 (0.90) | 24.7 | — | — | 5.69 | 9.27 |
+| 1,000,000 | eval | — | 6.17 (1.21) | 0.64 | — | — | 1.35 | — |
 
+- **Slang kernel column:** the same CPU, through Mesa's lavapipe (software Vulkan, LLVM-compiled SIMD) since there is no GPU here: a measurement of the kernel's work on this CPU, not of GPU speed. The BVH upload ("setup") was ≤ 0.09 s, the BVH build is the torch BVH's. Run-to-run variation on this machine ~25%. A variant with the held set kept sorted by insertion (d_k = last entry, no final sort) measured on lavapipe at N = 100k: fit −10%, eval (k = 32) +54%, k = 8 +26%; not adopted (GPU not measured).
 - **Exactness.** Brute force and faiss's flat index compute |q|² + |p|² − 2 q·p in float32 (cancellation); measured separately (5000 queries, k = 32): a wrong neighbor set for 1 query at N = 100k and 58 queries (1.2%) at N = 1M, k-th distance too large by up to 8e-6 (mean k-th distance 2.1e-2). The BVH, KeOps (differences) and kd-trees returned the exact sets. In the SDF the k-th neighbor's weight is ~e^-64 of the nearest, so the effect on φ is below float32 resolution.
 - **Shape of the BVH traversal.** 112-200 iterations of 88 torch ops each (N = 2k-1M, 100k queries), i.e. 10-18k small kernels per call, about independent of N. On a GPU this is launch-bound (~10 µs per launch: ~0.1-0.2 s per call) rather than work-bound; not measured here (no GPU).
 - **On CPU** compiled trees (scipy, nanoflann) are 10-100× faster than any torch method: the torch traversal pays Python-level iteration and per-op overhead. The `'auto'` threshold (32768 points) is the measured CPU crossover between torch brute force and the torch BVH.
-- **GPU:** run `python benchmarks/knn_bench.py --device cuda`.
+- **GPU:** run `python benchmarks/knn_bench.py --device cuda` (`--device cuda:1 --backends torch-bvh slang` for one GPU and some backends).
+
+### Fused Slang kernel (`knn_slang.py`, `slang/*.slang`)
+
+The torch traversal is launch-bound on a GPU (above). The kernel runs the whole traversal of one query in one thread:
+one dispatch per chunk of ≤ 2²⁰ queries, independent of the tree depth.
+
+- **Algorithm** (`slang/bvh.slang`, a function-by-function mirror of `sdfview/shaders/glsl/bvh.glsl`): depth-first,
+  nearer child first; a node is pruned when k points are held and dist²(q, box) > d_k², d_k the current k-th
+  distance; the held set is an unsorted array of k, a closer point replaces the farthest. `slang/knn.slang` then
+  insertion-sorts the k results by (distance, index) and writes row q. Exact: every point of a pruned box is at
+  distance ≥ dist(q, box) > d_k.
+- **Precision.** float32, distances from differences Σ (q_c − p_c)² (no |q|² + |p|² − 2 q·p cancellation). The
+  returned set can differ from the float64 one only where two candidate distances differ by less than float32
+  rounding of the coordinates. For float64 queries the returned distances are recomputed in float64 from the indices.
+- **Sizes.** Link-time constants per call: `BVH_K_MAX` = k rounded up to a power of two (≥ 8; per-thread arrays),
+  `BVH_STACK_SIZE` = BVH depth + 2 rounded up to 8 (a depth-first traversal that pushes both children of each
+  popped node holds ≤ depth + 1 entries, so the stack guard never drops a node). One compiled kernel per pair, cached
+  by slangpy. k > 1024 falls back to the torch traversal.
+- **Devices.** CUDA tensors: `spy.create_torch_device(type, torch_device=<tensors' device>)`; `'cuda'` (default)
+  shares torch's CUDA context on that GPU (no copies, torch's current stream); `config.SLANG_DEVICE_TYPE = 'vulkan'`
+  creates a Vulkan device on the same GPU (sgl matches the Vulkan adapter to the CUDA device UUID) with CUDA interop.
+  CPU tensors: a Vulkan device (`config.SLANG_ADAPTER` = adapter-name substring, else slangpy's default, the first
+  discrete GPU) with copies through NumPy; on a machine without a GPU, Mesa's lavapipe (software Vulkan). slangpy's
+  `cpu` device type does not run these calls (slangpy 0.43.1: "Device reports zero compute dispatch groups"), and
+  binding torch CPU tensors to a Vulkan device crashed (segfault) in a test with slangpy 0.43.1, hence the copies.
+- **Multi-GPU.** No masking needed: the slangpy device follows the torch device of the points (one slangpy device per
+  torch device, cached). For Vulkan without torch, slang-rhi's default adapter is the first discrete GPU in Vulkan
+  enumeration order, which need not be CUDA's device 0 (CUDA orders fastest first unless
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID`; `CUDA_VISIBLE_DEVICES` does not affect Vulkan).
 
 ## 2D SDFs (`shape_2d.SDF2D`, `shape_3d.SDF2D` / `SDF3D`)
 
@@ -300,6 +332,7 @@ The references are the original C++ built unmodified as `pat_reference` (`tests/
 | `fast_winding_number` vs libigl (same octree and expansions) | ≤ 3.4e-14; Barnes-Hut vs exact sum ≤ 0.15 near the surface (β = 2) |
 | `get_all_neighbors_and_subsample` vs C++ (one thread) | identical |
 | BVH k-NN / closest point / radius vs the C++ BVH | identical sets, distances ≤ 1e-14 |
+| Slang k-NN (lavapipe) vs float64 k-NN (k = 1 … 100, clustered cloud) | sorted exact distances of the returned sets equal the exact k-NN distances within float32 rounding; evaluator vs `'bvh'` ≤ 1e-9 relative |
 | BVH triangle rays (hits, t, barycentrics) / closest point on mesh | identical, ≤ 1e-12 / distances ≤ 1e-14 |
 | `cpp_random` vs g++ 13 libstdc++ (uniform, normal, int, shuffle, discrete) | bit-identical |
 | marching cubes vs scikit-image (sphere, 40³) | same vertex and triangle counts, area within 1e-7 |
