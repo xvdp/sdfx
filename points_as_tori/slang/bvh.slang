@@ -134,3 +134,94 @@ public int bvhKNearestNeighbors(Tensor<float, 2> bvh_bounds, Tensor<int, 2> bvh_
     }
     return count;
 }
+
+// k nearest points to `query` with the held set as a max-heap on squared distance (port of the original C++
+// BVH::find_k_nearest, src/cpp/bvh.cpp, std::priority_queue): heap_d[0] is the farthest held point, so the pruning
+// distance d_k² is read in O(1) and a closer candidate replaces the root and sifts down in O(log k), against O(k) for
+// the unsorted array of bvhKNearestNeighbors. Same traversal and pruning. Returns min(k, n); results in heap order
+// (not sorted); distances are squared. Loops are written out (no array arguments passed by value).
+public int bvhKNearestNeighborsHeap(Tensor<float, 2> bvh_bounds, Tensor<int, 2> bvh_nodes, Tensor<int, 2> bvh_prims,
+                                    Tensor<float, 2> points, float3 query, int k, out int heap_i[BVH_K_MAX],
+                                    out float heap_d[BVH_K_MAX])
+{
+    for (int j = 0; j < BVH_K_MAX; j++) {
+        heap_i[j] = -1;
+        heap_d[j] = INFINITY;
+    }
+    k = min(k, BVH_K_MAX);
+    if (k <= 0) return 0;
+
+    int count = 0;
+    float kth_dist_sq = INFINITY;  // heap_d[0] once k are held
+
+    int stack[BVH_STACK_SIZE];
+    int stack_ptr = 0;
+    stack[stack_ptr++] = 0;  // root
+
+    while (stack_ptr > 0) {
+        int node_idx = stack[--stack_ptr];
+
+        float3 aabb_min, aabb_max;
+        int left_idx, right_idx, prim_start, prim_count;
+        fetchBVHNode(bvh_bounds, bvh_nodes, node_idx, aabb_min, aabb_max, left_idx, right_idx, prim_start,
+                     prim_count);
+
+        if (count >= k && pointAABBDistanceSq(query, aabb_min, aabb_max) > kth_dist_sq) {
+            continue;
+        }
+
+        if (prim_count > 0) {
+            for (int i = 0; i < prim_count; i++) {
+                int prim_idx = bvh_prims[prim_start + i, 0];
+                float3 point = fetch_texel(points, prim_idx).xyz;
+                float dist_sq = dot(query - point, query - point);
+
+                if (count < k) {
+                    // push: sift up from the new last slot
+                    int c = count++;
+                    while (c > 0) {
+                        int p = (c - 1) >> 1;
+                        if (heap_d[p] >= dist_sq) break;
+                        heap_d[c] = heap_d[p];
+                        heap_i[c] = heap_i[p];
+                        c = p;
+                    }
+                    heap_d[c] = dist_sq;
+                    heap_i[c] = prim_idx;
+                    if (count == k) kth_dist_sq = heap_d[0];
+                } else if (dist_sq < kth_dist_sq) {
+                    // replace the root (farthest held): sift down
+                    int c = 0;
+                    while (true) {
+                        int child = 2 * c + 1;
+                        if (child >= k) break;
+                        if (child + 1 < k && heap_d[child + 1] > heap_d[child]) child++;
+                        if (heap_d[child] <= dist_sq) break;
+                        heap_d[c] = heap_d[child];
+                        heap_i[c] = heap_i[child];
+                        c = child;
+                    }
+                    heap_d[c] = dist_sq;
+                    heap_i[c] = prim_idx;
+                    kth_dist_sq = heap_d[0];
+                }
+            }
+        } else {
+            float3 left_min, left_max, right_min, right_max;
+            fetchBVHNodeAABB(bvh_bounds, left_idx, left_min, left_max);
+            fetchBVHNodeAABB(bvh_bounds, right_idx, right_min, right_max);
+            float left_dist_sq = pointAABBDistanceSq(query, left_min, left_max);
+            float right_dist_sq = pointAABBDistanceSq(query, right_min, right_max);
+
+            int near_idx = left_idx, far_idx = right_idx;
+            float near_dist_sq = left_dist_sq, far_dist_sq = right_dist_sq;
+            if (left_dist_sq >= right_dist_sq) {  // ties: right first, as in the original
+                near_idx = right_idx; far_idx = left_idx;
+                near_dist_sq = right_dist_sq; far_dist_sq = left_dist_sq;
+            }
+            if ((count < k || far_dist_sq <= kth_dist_sq) && stack_ptr < BVH_STACK_SIZE) stack[stack_ptr++] = far_idx;
+            if ((count < k || near_dist_sq <= kth_dist_sq) && stack_ptr < BVH_STACK_SIZE) stack[stack_ptr++] = near_idx;
+        }
+    }
+    return count;
+}

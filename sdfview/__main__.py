@@ -69,6 +69,29 @@ def cmd_pat(a):
 		show(scene, up=a.up)
 
 
+def cmd_superfit(a):
+	import torch
+
+	from superfit_sdf import SuperFitSDF
+
+	from .sources.superfit import scene_from_superfit
+
+	t = time.perf_counter()
+	sdf = SuperFitSDF(
+		a.input, program=a.program, mesh=a.mesh, device=a.device, dtype=torch.float64 if a.float64 else torch.float32
+	)
+	t_load = time.perf_counter() - t
+	t = time.perf_counter()
+	scene = scene_from_superfit(sdf, resolution=a.bake, meta={'input': a.input})
+	print(f'{sdf}: load {t_load:.2f} s, bake {a.bake}³ {time.perf_counter() - t:.2f} s')
+	scene.save(a.output)
+	print(f'wrote {a.output}: {scene}')
+	if a.view:
+		from . import show
+
+		show(scene, up=a.up)
+
+
 def cmd_view(a):
 	from . import show
 	from .scene import Scene
@@ -117,6 +140,20 @@ def main(argv=None):
 	p.add_argument('--view', action='store_true', help='open the viewer afterwards')
 	p.add_argument('--up', default='y', choices=['x', 'y', 'z'])
 	p.set_defaults(func=cmd_pat)
+
+	p = sub.add_parser('superfit', help='SuperFit primitive assembly (.pkl) -> scene (.sdfx), baked on a grid')
+	p.add_argument('input', help='primitive_assembly.pkl (loaded with an allow-list unpickler)')
+	p.add_argument('-o', '--output', required=True)
+	p.add_argument('--program', default='best', help="'best' (as SuperFit's get_best_expr), 'latest' or a key")
+	p.add_argument(
+		'--mesh', default=None, help="input mesh: evaluate in its frame (default: SuperFit's normalized frame)"
+	)
+	p.add_argument('--bake', type=int, default=192, help='grid samples per side')
+	p.add_argument('--device', default='cpu', help="torch device, e.g. 'cuda'")
+	p.add_argument('--float64', action='store_true')
+	p.add_argument('--view', action='store_true', help='open the viewer afterwards')
+	p.add_argument('--up', default='y', choices=['x', 'y', 'z'])
+	p.set_defaults(func=cmd_superfit)
 
 	p = sub.add_parser('view', help='open a window')
 	p.add_argument('scene')

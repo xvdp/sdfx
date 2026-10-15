@@ -1,0 +1,396 @@
+"""
+Process the same shapes with Points as Tori (PAT) and SuperFit (SUP) and compare their SDFs with the input mesh.
+
+	# SuperFit assemblies (e.g. the Hugging Face release) with the meshes they were fitted to
+	python experiments/compare_pat_sup.py --assembly A.pkl --mesh A.obj --device cuda:1 -o results/
+	python experiments/compare_pat_sup.py --assembly-dir release/dataset/toys4k/superfrustum --mesh-root /data/toys4k \
+		--device cuda:1 -o results/ --limit 20
+	# PAT only, any meshes
+	python experiments/compare_pat_sup.py --mesh a.obj b.ply --device cuda -o results/
+	# fit SuperFit as well, with SuperFit's own environment (its scripts/mesh_to_assembly.py)
+	python experiments/compare_pat_sup.py --mesh a.obj --fit-superfit --superfit-python ~/conda/envs/superfit/bin/python \
+		--device cuda -o results/
+
+Per shape:
+  1. the mesh is read as SuperFit reads it (trimesh, force='mesh', process=False) and mapped to SuperFit's normalized
+     frame p_n = s (p - c), s = 1.8 / max bounding-box extent, c = bounding-box centre; everything below is in that frame;
+  2. ground truth φ_gt: --gt cubvh = SuperFit's own (cubvh signed_distance, mode 'raystab', CUDA); --gt gwn = the port's
+     mesh signed distance (closest-point distance through the torch BVH, sign from the generalized winding number,
+     inside where W > 1/2); 'auto' = cubvh if importable;
+  3. PAT: an oriented point cloud of --pat-points samples, uniform by area on the normalized mesh with face normals
+     (optionally noisy), then PointsAsTori (pre-trained network + torus fit), φ_pat = signed_distance (k = 32);
+  4. SUP: superfit_sdf.SuperFitSDF of the assembly (normalized frame, deterministic argmax reduction);
+  5. metrics per model, with the definitions of SuperFit's evaluation (algos/eval_tools.py) where they apply:
+	   iou@R          voxel IoU of {φ ≤ 0} on the R³ voxel centres (2i + 1)/R - 1 of [-1, 1]³ (SuperFit: R = 128)
+	   iou_gt_surface IoU of {φ ≤ 0} on 100k points p + n ⊙ u near the GT surface: p uniform by area, n its face
+	                  normal, u ~ U(-0.05, 0.05)³ elementwise (SuperFit's sample_surface_proximal_points)
+	   iou_pred_surface  the same around the model's surface (marching cubes of its R³ grid)
+	   bidir_surface_iou mean of the two
+	   cd_x100        Chamfer: 2048 points on each surface (GT mesh, model's marching-cubes mesh), mean squared
+	                  nearest distance in each direction, averaged, × 100 (SuperFit's CD_AVG@2048); its floor is the
+	                  sampling: the GT against its own 32³ marching-cubes surface gives 0.11 on knot.obj
+	   sdf_mae / sdf_median_ae  |φ - φ_gt| on the near-surface points
+	   normal_cos / normal_abs_cos  mean cos and |cos| between ∇φ (central differences, h = 1e-3) and the GT face
+	                  normal at GT surface samples
+	   time_*         seconds: PAT tori (network + fit) and grid evaluation; SUP grid evaluation, its fit time from the
+	                  assembly ('total_time'); counts: PAT points, SUP primitives
+Differences from SuperFit's own numbers: SuperFit evaluates against its remeshed watertight target (cubvh + fast
+sweeping + FlexiCubes), not the input mesh, and takes the best of ~100 Gumbel samples of the assembly; here the input
+mesh and the argmax assembly. Results: <out>/metrics.jsonl (one row per shape and model) and a summary table; with
+--scenes, .sdfx scenes of the GT grid and of both models (python -m sdfview view <file>).
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import subprocess
+import sys
+import time
+
+import numpy as np
+import torch
+
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, REPO)
+
+import points_as_tori as pat  # noqa: E402
+from points_as_tori import config  # noqa: E402
+from points_as_tori.bvh import BVH  # noqa: E402
+from points_as_tori.isosurface import marching_cubes  # noqa: E402
+from points_as_tori.shape_3d import TriangleMesh  # noqa: E402
+from points_as_tori.training.mesh_sampling import gwn_mesh  # noqa: E402
+
+NEAR_SURFACE_POINTS = 100_000
+NEAR_SURFACE_JITTER = 0.05
+CHAMFER_POINTS = 2048
+FD_STEP = 1e-3
+
+
+# ----------------------------------------------------------------------------------------------- mesh, ground truth
+
+
+def read_mesh(path: str):
+	import trimesh
+
+	mesh = trimesh.load(path, force='mesh', process=False)
+	return np.asarray(mesh.vertices, dtype=np.float64), np.asarray(mesh.faces, dtype=np.int64)
+
+
+def normalize(vertices: np.ndarray):
+	from superfit_sdf import mesh_normalization
+
+	s, c = mesh_normalization(vertices)
+	return (vertices - c) * s, s, c
+
+
+class GroundTruth:
+	"""Signed distance to the (normalized) input mesh: (3, Q) -> (Q,), negative inside."""
+
+	def __init__(self, vertices: np.ndarray, faces: np.ndarray, method: str, device: torch.device):
+		self.device = device
+		if method == 'auto':
+			try:
+				import cubvh  # noqa: F401
+
+				method = 'cubvh' if device.type == 'cuda' else 'gwn'
+			except ImportError:
+				method = 'gwn'
+		self.method = method
+		if method == 'cubvh':
+			import cubvh
+
+			self._bvh = cubvh.cuBVH(vertices.astype(np.float32), faces.astype(np.int32))
+		else:
+			self.V = config.as_wide(vertices, 3)
+			self.F = config.as_wide(faces, 3, dtype=torch.long)
+			self._bvh = BVH(self.V, self.F)
+			self._mask = torch.ones(self.F.shape[1], dtype=torch.bool, device=self.F.device)
+
+	def __call__(self, q: torch.Tensor) -> torch.Tensor:
+		if self.method == 'cubvh':
+			d, _, _ = self._bvh.signed_distance(q.T.contiguous().float(), return_uvw=False, mode='raystab')
+			return torch.as_tensor(d, device=q.device).to(q.dtype)
+		out = torch.empty(q.shape[1], dtype=q.dtype, device=q.device)
+		chunk = max(1, config.CHUNK_ELEMENTS // max(1, self.F.shape[1]))
+		_, dist, _ = self._bvh.closest_point_on_mesh(q)
+		for s in range(0, q.shape[1], chunk):
+			w = gwn_mesh(q[:, s : s + chunk], self.V, self.F, self._mask) / (4 * np.pi)
+			out[s : s + chunk] = torch.where(w > 0.5, -dist[s : s + chunk], dist[s : s + chunk])
+		return out
+
+
+def surface_samples(vertices, faces, n: int, seed: int):
+	"""(points (3, n), unit face normals (3, n)), uniform by area."""
+	mesh = TriangleMesh(vertices, faces)
+	p, nrm = mesh.sample_points_and_normals_uniformly(n, seed=seed)
+	return p, nrm / nrm.norm(dim=0, keepdim=True).clamp_min(1e-12)
+
+
+def near_surface(points, normals, seed: int):
+	gen = torch.Generator(device='cpu').manual_seed(seed)
+	u = (torch.rand(points.shape, generator=gen, dtype=points.dtype) * 2 - 1) * NEAR_SURFACE_JITTER
+	return points + normals * u.to(points.device)
+
+
+def voxel_centres(res: int, device, dtype):
+	x = (2 * torch.arange(res, device=device, dtype=dtype) + 1) / res - 1
+	X, Y, Z = torch.meshgrid(x, x, x, indexing='ij')
+	return torch.stack([X.reshape(-1), Y.reshape(-1), Z.reshape(-1)]), x
+
+
+def evaluate_chunked(fn, q: torch.Tensor, chunk: int = 1 << 20) -> torch.Tensor:
+	return torch.cat([fn(q[:, s : s + chunk]).reshape(-1).to(q.dtype) for s in range(0, q.shape[1], chunk)])
+
+
+# ----------------------------------------------------------------------------------------------- metrics
+
+
+def iou(a: torch.Tensor, b: torch.Tensor) -> float:
+	union = (a | b).sum()
+	return float((a & b).sum() / union) if int(union) > 0 else float('nan')
+
+
+def chamfer_x100(a: torch.Tensor, b: torch.Tensor) -> float:
+	"""a (3, n), b (3, m): (mean_a min_b |a - b|² + mean_b min_a |a - b|²) / 2 × 100."""
+	d2 = torch.cdist(a.T.double(), b.T.double()) ** 2
+	return float((d2.min(dim=1).values.mean() + d2.min(dim=0).values.mean()) / 2 * 100)
+
+
+def gradient_fd(fn, q: torch.Tensor, h: float = FD_STEP) -> torch.Tensor:
+	g = []
+	for i in range(3):
+		e = torch.zeros(3, 1, dtype=q.dtype, device=q.device)
+		e[i] = h
+		g.append((evaluate_chunked(fn, q + e) - evaluate_chunked(fn, q - e)) / (2 * h))
+	return torch.stack(g)
+
+
+def model_metrics(fn, gt, ctx: dict) -> dict:
+	"""All metrics of one model `fn` ((3, Q) -> (Q,)) against the ground truth `gt` (see the module docstring)."""
+	res, seed = ctx['res'], ctx['seed']
+	out = {}
+	t = time.perf_counter()
+	values = evaluate_chunked(fn, ctx['grid'])
+	if values.is_cuda:
+		torch.cuda.synchronize(values.device)
+	out['time_grid'] = time.perf_counter() - t
+	occ = values <= 0
+	out[f'iou@{res}'] = iou(occ, ctx['gt_occ'])
+
+	near_phi = evaluate_chunked(fn, ctx['near'])
+	out['iou_gt_surface'] = iou(near_phi <= 0, ctx['near_gt'] <= 0)
+	err = (near_phi - ctx['near_gt']).abs()
+	out['sdf_mae'], out['sdf_median_ae'] = float(err.mean()), float(err.median())
+
+	p, n = ctx['gt_surface']
+	g = gradient_fd(fn, p)
+	cos = (g * n).sum(dim=0) / g.norm(dim=0).clamp_min(1e-12)
+	out['normal_cos'], out['normal_abs_cos'] = float(cos.mean()), float(cos.abs().mean())
+
+	if bool(occ.any()) and not bool(occ.all()):
+		axis = ctx['axis']
+		v, f = marching_cubes(values.reshape(res, res, res), axis[[0, 0, 0]], axis[[-1, -1, -1]], 0.0)
+		v_np, f_np = config.to_numpy(v).astype(np.float64), config.to_numpy(f).astype(np.int64)  # (V, 3), (F, 3)
+		out['triangles'] = int(f_np.shape[0])
+		model_points, _ = surface_samples(v_np, f_np, CHAMFER_POINTS, seed + 1)
+		out['cd_x100'] = chamfer_x100(model_points, ctx['gt_chamfer'])
+		pp, pn = surface_samples(v_np, f_np, NEAR_SURFACE_POINTS, seed + 3)
+		pred_near = near_surface(pp, pn, seed + 4)
+		out['iou_pred_surface'] = iou(evaluate_chunked(fn, pred_near) <= 0, evaluate_chunked(gt, pred_near) <= 0)
+		out['bidir_surface_iou'] = (out['iou_gt_surface'] + out['iou_pred_surface']) / 2
+	else:  # empty or full grid: no surface
+		out['cd_x100'] = out['iou_pred_surface'] = out['bidir_surface_iou'] = float('nan')
+	return out
+
+
+# ----------------------------------------------------------------------------------------------- models
+
+
+def run_pat(vertices, faces, n_points: int, seed: int, noise: float):
+	p, n = surface_samples(vertices, faces, n_points, seed)
+	if noise > 0:
+		gen = torch.Generator(device='cpu').manual_seed(seed + 10)
+		p = p + noise * torch.randn(p.shape, generator=gen, dtype=p.dtype).to(p.device)
+	t = time.perf_counter()
+	sdf = pat.PointsAsTori(config.to_numpy(p), config.to_numpy(n))  # (n, 3)
+	if p.is_cuda:
+		torch.cuda.synchronize(p.device)
+	return sdf, time.perf_counter() - t
+
+
+def fit_superfit(mesh_path: str, out_dir: str, python: str) -> str:
+	"""Run SuperFit's scripts/mesh_to_assembly.py (its own environment); returns the written assembly."""
+	save_dir = os.path.join(out_dir, 'superfit', os.path.splitext(os.path.basename(mesh_path))[0])
+	os.makedirs(save_dir, exist_ok=True)
+	cmd = [python, 'scripts/mesh_to_assembly.py', '--input_path', os.path.abspath(mesh_path), '--save_dir', save_dir,
+		   '--fastmode']  # fmt: skip
+	print('  ' + ' '.join(cmd), flush=True)
+	subprocess.run(cmd, cwd=os.path.join(REPO, 'ext', 'superfit'), check=True)
+	found = [f for f in glob.glob(os.path.join(save_dir, '**', '*.pkl'), recursive=True) if 'stepwise' not in f]
+	if not found:
+		raise FileNotFoundError(f'no assembly .pkl written under {save_dir}')
+	return sorted(found, key=os.path.getmtime)[-1]
+
+
+def assembly_mesh_path(assembly: str, mesh_root: str) -> str:
+	"""The input mesh of an assembly: its stored path, or that path re-rooted under mesh_root (longest suffix found)."""
+	from superfit_sdf import load_assembly
+
+	data = load_assembly(assembly)
+	stored = data.get('input_mesh_file') or data.get('input_path')
+	if stored is None:
+		raise KeyError(f'{assembly}: no input_mesh_file / input_path; pass --mesh')
+	if os.path.isfile(stored):
+		return stored
+	parts = stored.replace('\\', '/').split('/')
+	for i in range(1, len(parts)):
+		candidate = os.path.join(mesh_root or '', *parts[i:])
+		if os.path.isfile(candidate):
+			return candidate
+	raise FileNotFoundError(f'{assembly}: input mesh {stored} not found (set --mesh-root to the dataset root)')
+
+
+# ----------------------------------------------------------------------------------------------- driver
+
+
+def process(name, mesh_path, assembly, a, device, dtype, out_dir):
+	V, F = read_mesh(mesh_path)
+	Vn, s, c = normalize(V)
+	gt = GroundTruth(Vn, F, a.gt, device)
+	grid, axis = voxel_centres(a.res, device, dtype)
+	gt_surface = surface_samples(Vn, F, NEAR_SURFACE_POINTS, a.seed)
+	near = near_surface(*gt_surface, a.seed + 5)
+	ctx = {'res': a.res, 'seed': a.seed, 'grid': grid, 'axis': axis, 'gt_occ': evaluate_chunked(gt, grid) <= 0,
+		   'gt_surface': gt_surface, 'near': near, 'near_gt': evaluate_chunked(gt, near),
+		   'gt_chamfer': surface_samples(Vn, F, CHAMFER_POINTS, a.seed + 2)[0]}  # fmt: skip
+	common = {'shape': name, 'mesh': mesh_path, 'faces': int(F.shape[0]), 'gt': gt.method, 'scale': s}
+	rows = []
+
+	if not a.skip_pat:
+		sdf, t_fit = run_pat(Vn, F, a.pat_points, a.seed, a.pat_noise)
+		row = {**common, 'model': 'PAT', 'points': a.pat_points, 'time_fit': t_fit}
+		row.update(model_metrics(sdf.signed_distance, gt, ctx))
+		rows.append(row)
+		if a.scenes:
+			from sdfview.sources.pat import scene_from_pat
+
+			scene_from_pat(sdf, bake_resolution=a.res, meta={'input': mesh_path}).save(
+				os.path.join(out_dir, f'{name}.pat.sdfx')
+			)
+
+	if assembly is not None:
+		from superfit_sdf import SuperFitSDF
+
+		sup = SuperFitSDF(assembly, program=a.program, device=device, dtype=dtype)
+		row = {**common, 'model': 'SUP', 'assembly': assembly, 'program': sup.program, 'primitives': sup.n_primitives}
+		fit_time = sup.data.get('total_time')
+		row['time_fit'] = float(fit_time) if fit_time is not None else float('nan')
+		row.update(model_metrics(sup, gt, ctx))
+		rows.append(row)
+		if a.scenes:
+			from sdfview.sources.superfit import scene_from_superfit
+
+			scene_from_superfit(sup, resolution=a.res, meta={'input': assembly}).save(
+				os.path.join(out_dir, f'{name}.sup.sdfx')
+			)
+
+	if a.scenes:
+		from sdfview.scene import Scene, grid_field
+		from sdfview.sources.grid import bake_grid
+
+		scene = Scene(
+			bounds_min=[-1, -1, -1], bounds_max=[1, 1, 1], meta={'input': mesh_path, 'source': 'ground truth'}
+		)
+		values = bake_grid(gt, [-1, -1, -1], [1, 1, 1], a.res, device=device, dtype=dtype)
+		grid_field(scene, 'gt', values, [-1, -1, -1], [1, 1, 1])
+		scene.save(os.path.join(out_dir, f'{name}.gt.sdfx'))
+	return rows
+
+
+def shapes(a, out_dir):
+	"""(name, mesh path, assembly path or None) for the requested inputs."""
+	if a.assembly_dir:
+		paths = sorted(glob.glob(os.path.join(a.assembly_dir, '**', 'primitive_assembly.pkl'), recursive=True))
+		for path in paths[: a.limit or None]:
+			name = os.path.basename(os.path.dirname(path))
+			yield name, assembly_mesh_path(path, a.mesh_root), path
+		return
+	assemblies = a.assembly or []
+	meshes = a.mesh or []
+	if assemblies and meshes and len(assemblies) != len(meshes):
+		raise SystemExit('--assembly and --mesh must pair one to one')
+	if assemblies and not meshes:
+		meshes = [assembly_mesh_path(x, a.mesh_root) for x in assemblies]
+	for i, mesh in enumerate(meshes[: a.limit or None]):
+		assembly = assemblies[i] if assemblies else None
+		if assembly is None and a.fit_superfit:
+			assembly = fit_superfit(mesh, out_dir, a.superfit_python)
+		yield os.path.splitext(os.path.basename(mesh))[0], mesh, assembly
+
+
+def main(argv=None):
+	ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+	ap.add_argument('--mesh', nargs='+', help='input meshes (pair with --assembly, or PAT only)')
+	ap.add_argument('--assembly', nargs='+', help='SuperFit primitive_assembly.pkl files')
+	ap.add_argument('--assembly-dir', help='directory searched for primitive_assembly.pkl (e.g. the HF release)')
+	ap.add_argument('--mesh-root', help="root to re-root the assemblies' stored mesh paths under")
+	ap.add_argument('--fit-superfit', action='store_true', help='fit SuperFit for meshes without an assembly')
+	ap.add_argument('--superfit-python', default=sys.executable, help="python of SuperFit's environment")
+	ap.add_argument('--program', default='best', help="assembly program: 'best', 'latest' or a key")
+	ap.add_argument('-o', '--out', required=True, help='output directory')
+	ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+	ap.add_argument('--float64', action='store_true', help='float64 geometry (default float32)')
+	ap.add_argument('--gt', default='auto', choices=['auto', 'cubvh', 'gwn'])
+	ap.add_argument('--res', type=int, default=128, help='grid resolution of the IoU and of the surfaces')
+	ap.add_argument('--pat-points', type=int, default=50_000, help='PAT input point cloud size')
+	ap.add_argument('--pat-noise', type=float, default=0.0, help='Gaussian position noise of the PAT input')
+	ap.add_argument('--skip-pat', action='store_true')
+	ap.add_argument('--scenes', action='store_true', help='also write .sdfx scenes (GT, PAT, SUP)')
+	ap.add_argument('--limit', type=int, default=0, help='first N shapes only')
+	ap.add_argument('--seed', type=int, default=0)
+	a = ap.parse_args(argv)
+	if not (a.mesh or a.assembly or a.assembly_dir):
+		ap.error('give --mesh, --assembly or --assembly-dir')
+
+	dtype = torch.float64 if a.float64 else torch.float32
+	pat.set_device(a.device, dtype)
+	device = config.get_device()
+	os.makedirs(a.out, exist_ok=True)
+	results = os.path.join(a.out, 'metrics.jsonl')
+	all_rows = []
+	with open(results, 'a') as f:
+		for name, mesh, assembly in shapes(a, a.out):
+			print(f'--- {name}: {mesh}' + (f' | {assembly}' if assembly else ''), flush=True)
+			try:
+				rows = process(name, mesh, assembly, a, device, dtype, a.out)
+			except Exception:  # noqa: BLE001  (one bad shape does not stop a dataset run)
+				import traceback
+
+				print(f'  FAILED {name}:', flush=True)
+				traceback.print_exc()
+				continue
+			for row in rows:
+				f.write(json.dumps(row) + '\n')
+				f.flush()
+				all_rows.append(row)
+				print('  ' + ', '.join(f'{k} {v:.4g}' if isinstance(v, float) else f'{k} {v}' for k, v in row.items()
+										if k not in ('mesh', 'assembly', 'shape')), flush=True)  # fmt: skip
+	summary(all_rows, a.res)
+	print(f'wrote {results}')
+
+
+def summary(rows, res):
+	keys = [f'iou@{res}', 'bidir_surface_iou', 'cd_x100', 'sdf_mae', 'normal_abs_cos', 'time_fit', 'time_grid']
+	for model in ('PAT', 'SUP'):
+		sel = [r for r in rows if r['model'] == model]
+		if not sel:
+			continue
+		means = {k: np.nanmean([r.get(k, np.nan) for r in sel]) for k in keys}
+		print(f'{model} ({len(sel)} shapes, means): ' + ', '.join(f'{k} {v:.4g}' for k, v in means.items()))
+
+
+if __name__ == '__main__':
+	main()

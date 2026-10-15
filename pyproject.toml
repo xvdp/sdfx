@@ -22,6 +22,9 @@ test = ["pytest"]
 dataset = ["thingi10k", "py7zr", "numpy-stl", "pyfqmr"]
 # fused Slang k-NN kernel (config.KNN_BACKEND = 'slang'); slangpy-torch is optional (faster torch tensor binding)
 slang = ["slangpy>=0.43"]
+# SuperFit assemblies as torch SDFs (superfit_sdf): SuperFit's expression / shader libraries (MIT) and mesh reading;
+# SuperFit itself (Adobe Research License) comes from ext/superfit or SUPERFIT_ROOT
+superfit = ["geolipi>=0.1", "sysl3d>=0.1", "sympy>=1.12", "trimesh>=4.0"]
 # viewer (sdfview): OpenGL 3.3 via moderngl; window via moderngl-window (pyglet backend by default, glfw optional)
 view = ["moderngl>=5.8", "moderngl-window>=3.0", "pyglet>=2.0"]
 # parity references for the tests: the original JAX code and the original C++ (built from tests/points_as_tori/reference)
@@ -29,11 +32,12 @@ reference = ["jax==0.8.2", "flax==0.12.2", "optax", "nanobind", "matplotlib"]
 # can toml see if the machine has cuda and what version and then install pip install -U "jax[cuda12]" for example? 
 
 [tool.setuptools.packages.find]
-include = ["points_as_tori*", "sdfview*"]
+include = ["points_as_tori*", "sdfview*", "superfit_sdf*"]
 
 [tool.setuptools.package-data]
 points_as_tori = ["models/*.pt", "slang/*.slang", "PORT_NOTES.md"]
 sdfview = ["shaders/glsl/*", "web/*.js", "NOTES.md"]
+superfit_sdf = ["NOTES.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

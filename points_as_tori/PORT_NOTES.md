@@ -66,7 +66,7 @@ Per query q with neighbors N(q), oriented points p_i, and tori (c_i, a_i, R_i, r
    - `'brute'`: one GEMM for squared distances, then `topk` per query chunk; O(|Q||P|).
    - `'bvh'`: the BVH of `bvh.py`, traversed by all queries at once; O(|Q| · visited nodes).
    - `'slang'`: the same BVH traversed by a fused Slang kernel (`knn_slang.py`), one GPU thread per query; needs slangpy. Neighbors selected with float32 distances.
-   - `'auto'` (default): `'bvh'` from `config.KNN_BVH_MIN_POINTS` = 32768 points on (a CPU crossover; see "k-NN backends").
+   - `'auto'` (default): on CUDA devices `'slang'` when slangpy is installed and the kernel runs there (otherwise a warning, once); else `'bvh'` from `config.KNN_BVH_MIN_POINTS` = 32768 points on (a CPU crossover), else `'brute'` (see "k-NN backends").
    Distances that enter the SDF are recomputed exactly from the gathered differences. `'brute'` and `'bvh'` return the C++ neighbors (tested) and give bitwise-identical evaluator output; `'slang'` returns the exact neighbors up to float32 near-ties (tested against float64 k-NN distances) and evaluator output equal to `'bvh'` within 1e-9 relative.
 2. **Radius evaluation** is dense over all points, masked to |q − p| < r. The k-NN fallback is computed for every query and selected per query.
 3. **`set_radius_evaluation` / `set_lambda_scale`** round their argument through float32, because the C++ setters take `float`. Without this, results differ at the 1e-9 level; with it they agree to 1e-15.
@@ -108,21 +108,55 @@ Per query q with neighbors N(q), oriented points p_i, and tori (c_i, a_i, R_i, r
 | 1,000,000 | fit | — | 144 (0.90) | 24.7 | — | — | 5.69 | 9.27 |
 | 1,000,000 | eval | — | 6.17 (1.21) | 0.64 | — | — | 1.35 | — |
 
-- **Slang kernel column:** the same CPU, through Mesa's lavapipe (software Vulkan, LLVM-compiled SIMD) since there is no GPU here: a measurement of the kernel's work on this CPU, not of GPU speed. The BVH upload ("setup") was ≤ 0.09 s, the BVH build is the torch BVH's. Run-to-run variation on this machine ~25%. A variant with the held set kept sorted by insertion (d_k = last entry, no final sort) measured on lavapipe at N = 100k: fit −10%, eval (k = 32) +54%, k = 8 +26%; not adopted (GPU not measured).
+- **Slang kernel column:** the same CPU, through Mesa's lavapipe (software Vulkan, LLVM-compiled SIMD) since there is no GPU here: a measurement of the kernel's work on this CPU, not of GPU speed. The BVH upload ("setup") was ≤ 0.09 s, the BVH build is the torch BVH's. Run-to-run variation on this machine ~25%. A variant with the held set kept sorted by insertion (d_k = last entry, no final sort) measured on lavapipe at N = 100k: fit −10%, eval (k = 32) +54%, k = 8 +26%; not adopted (GPU not measured). The column is the 'scan' kernel (held set as an unsorted array, as the GLSL shader); the 'heap' kernel (max-heap as the original C++, now the default) measured on lavapipe: N = 20k fit 0.26 s (scan 0.45), eval 0.65 (scan 0.45); N = 100k fit 1.25 (scan 2.40), eval 0.57 (scan 0.52): about 2× faster at k = 64, 10-40% slower at k = 32. GPU: `--backends slang slang-scan`.
 - **Exactness.** Brute force and faiss's flat index compute |q|² + |p|² − 2 q·p in float32 (cancellation); measured separately (5000 queries, k = 32): a wrong neighbor set for 1 query at N = 100k and 58 queries (1.2%) at N = 1M, k-th distance too large by up to 8e-6 (mean k-th distance 2.1e-2). The BVH, KeOps (differences) and kd-trees returned the exact sets. In the SDF the k-th neighbor's weight is ~e^-64 of the nearest, so the effect on φ is below float32 resolution.
 - **Shape of the BVH traversal.** 112-200 iterations of 88 torch ops each (N = 2k-1M, 100k queries), i.e. 10-18k small kernels per call, about independent of N. On a GPU this is launch-bound (~10 µs per launch: ~0.1-0.2 s per call) rather than work-bound; not measured here (no GPU).
 - **On CPU** compiled trees (scipy, nanoflann) are 10-100× faster than any torch method: the torch traversal pays Python-level iteration and per-op overhead. The `'auto'` threshold (32768 points) is the measured CPU crossover between torch brute force and the torch BVH.
 - **GPU:** run `python benchmarks/knn_bench.py --device cuda` (`--device cuda:1 --backends torch-bvh slang` for one GPU and some backends).
+
+**GPU** (`benchmarks/knn_bench.py`, torch 2.11.0+cu128, slangpy 0.43.0 CUDA device, float32; same workloads; seconds;
+"×" = a wrong k-th neighbor for some queries). Slang `heap` = default kernel, `scan` = GLSL-mirror kernel.
+
+| N | work | RTX A6000: torch brute | torch BVH (build) | Slang heap | Slang scan | TITAN RTX: torch BVH (build) | Slang heap | Slang scan |
+|---|---|---|---|---|---|---|---|---|
+| 2,048 | fit | 0.0006 | 0.163 (0.013) | 0.0007 | 0.0015 | 0.159 (0.011) | 0.0012 | 0.0019 |
+| 2,048 | eval | 0.025 | 0.144 (0.011) | 0.0040 | 0.0033 | 0.191 (0.011) | 0.0103 | 0.0075 |
+| 20,000 | fit | 0.044 | 0.181 (0.013) | 0.0025 | 0.0038 | 0.179 (0.013) | 0.0039 | 0.0080 |
+| 20,000 | eval | 0.218 × | 0.165 (0.013) | 0.0050 | 0.0047 | 0.212 (0.013) | 0.0093 | 0.0110 |
+| 100,000 | fit | 1.05 × | 0.351 (0.015) | 0.018 | 0.026 | 0.490 (0.016) | 0.036 | 0.055 |
+| 100,000 | eval | 1.04 × | 0.215 (0.014) | 0.0071 | 0.0068 | 0.266 (0.014) | 0.0137 | 0.0163 |
+| 1,000,000 | fit | 171 × | 3.17 (0.035) | 0.210 | 0.279 | 4.51 (0.045) | 0.421 | 0.596 |
+| 1,000,000 | eval | 17.0 × | 0.399 (0.035) | 0.0115 | 0.0107 | 0.500 (0.046) | 0.0218 | 0.0278 |
+
+- **Slang vs the torch traversal:** 15-230× faster (A6000), 11-130× (TITAN RTX). The torch BVH's floor of ~0.15 s at
+  small N is the launch-bound cost estimated above (~10-18k small kernels per call). The Slang BVH upload ("setup")
+  is ≤ 1 ms; the BVH build (torch, 11-46 ms) is shared.
+- **Slang vs brute force (A6000):** equal at N = 2048 fit (0.6-0.7 ms), 6-1500× faster everywhere else; the brute
+  force also returned wrong k-th neighbors from N = 20k (float32 GEMM cancellation).
+- **heap vs scan:** heap faster at k = 64 (fit: 1.3-2.1×). At k = 32 (eval) the heap / scan time ratio is
+  0.78-1.37: scan faster on the A6000 (by 4-21%) and on the TITAN RTX at N = 2048 (heap 1.37×), heap faster on the
+  TITAN RTX from 20k (scan 1.18-1.28×). The heap stays the default for every k: at most 1.37× slower, up to 2.1×
+  faster.
+- **'auto' on CUDA = 'slang'** follows from these rows (fastest or equal at every size). Without slangpy, or when the
+  kernel cannot run on the device, 'auto' keeps the size rule: on GPU the torch brute force beats the torch BVH up to
+  N = 20k fit and loses from 20k eval, so the CPU crossover (32768) also lies within the GPU's measured range.
+- **float64 configurations:** 'slang' selects neighbors with float32 distances; distances are then recomputed in
+  float64. Neighbor sets can differ from the float64 ones only at float32 near-ties, where the blend weight of the
+  k-th neighbor is ~e⁻⁶⁴ of the nearest's. For neighbor sets equal to the C++ ones set `config.KNN_BACKEND = 'bvh'`.
 
 ### Fused Slang kernel (`knn_slang.py`, `slang/*.slang`)
 
 The torch traversal is launch-bound on a GPU (above). The kernel runs the whole traversal of one query in one thread:
 one dispatch per chunk of ≤ 2²⁰ queries, independent of the tree depth.
 
-- **Algorithm** (`slang/bvh.slang`, a function-by-function mirror of `sdfview/shaders/glsl/bvh.glsl`): depth-first,
-  nearer child first; a node is pruned when k points are held and dist²(q, box) > d_k², d_k the current k-th
-  distance; the held set is an unsorted array of k, a closer point replaces the farthest. `slang/knn.slang` then
-  insertion-sorts the k results by (distance, index) and writes row q. Exact: every point of a pruned box is at
+- **Algorithm** (`slang/bvh.slang`): depth-first, nearer child first; a node is pruned when k points are held and
+  dist²(q, box) > d_k², d_k the current k-th distance. Held set, two variants (`SlangKNN(..., variant=)`):
+  `'scan'` (`bvhKNearestNeighbors`, function-by-function mirror of `sdfview/shaders/glsl/bvh.glsl`): an unsorted
+  array of k, a closer point replaces the farthest found by an O(k) scan, d_k recomputed in O(k), insertion sort at
+  the end (O(k²)); `'heap'` (`bvhKNearestNeighborsHeap`, default, the original C++ `std::priority_queue`): a
+  max-heap on squared distance, d_k = root, replacement sifts down in O(log k), heapsort at the end (O(k log k)).
+  Per accepted candidate at k = 64: ~2k = 128 operations vs ~2 log₂k = 12. `slang/knn.slang` writes row q ordered by
+  (distance, index). Exact: every point of a pruned box is at
   distance ≥ dist(q, box) > d_k.
 - **Precision.** float32, distances from differences Σ (q_c − p_c)² (no |q|² + |p|² − 2 q·p cancellation). The
   returned set can differ from the float64 one only where two candidate distances differ by less than float32
@@ -138,6 +172,31 @@ one dispatch per chunk of ≤ 2²⁰ queries, independent of the tree depth.
   discrete GPU) with copies through NumPy; on a machine without a GPU, Mesa's lavapipe (software Vulkan). slangpy's
   `cpu` device type does not run these calls (slangpy 0.43.1: "Device reports zero compute dispatch groups"), and
   binding torch CPU tensors to a Vulkan device crashed (segfault) in a test with slangpy 0.43.1, hence the copies.
+- **NVRTC (CUDA device type only).** slangpy's CUDA device compiles PTX at run time with NVRTC, looked up twice:
+  slang-rhi (device creation, its internal kernels) takes the first `libnvrtc.so` in `$CUDA_PATH/{lib64, lib,
+  targets/x86_64-linux/lib}`, then `/usr/local/cuda*` (newest first), then `/usr/lib/x86_64-linux-gnu`; Slang (the
+  k-NN kernel) loads `libnvrtc.so` through the dynamic loader (`LD_LIBRARY_PATH`, ld.so cache). PTX from an NVRTC
+  newer than the CUDA version the driver supports is rejected (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`, 222): point
+  both lookups at a toolkit no newer than the driver, `export CUDA_PATH=/usr/local/cuda-X.Y` and
+  `export LD_LIBRARY_PATH=/usr/local/cuda-X.Y/lib64:$LD_LIBRARY_PATH` before starting Python, or update the driver.
+  slang-rhi also needs `cuda_runtime.h` in `<dir of libnvrtc.so>/../include`, `<dir>/../../include` or
+  `/usr/include`; `CUDA_HOME` (nvcc, torch extensions) is not read. Conda CUDA packages keep headers and libraries
+  under `$CONDA_PREFIX/targets/x86_64-linux/{include, lib}` (with `lib/libnvrtc.so` from `cuda-nvrtc-dev`), so there
+  `CUDA_PATH=$CONDA_PREFIX/targets/x86_64-linux`. `lib/stubs` directories hold link-time stubs and must not be on
+  `LD_LIBRARY_PATH`. The Vulkan device type compiles to SPIR-V without NVRTC. `python -m points_as_tori.knn_slang`
+  prints the driver's CUDA version, the NVRTC each lookup resolves to, the headers slang-rhi finds, and stub
+  directories on the loader path.
+- **Context order (Vulkan interop, several GPUs).** Measured on a TITAN RTX + RTX A6000, slangpy 0.43.0: a GPU's
+  CUDA context created after a Vulkan device with CUDA interop exists in the process (on another GPU) was later
+  unusable, `CUDA_ERROR_OPERATING_SYSTEM` (304): slang-rhi's `cuCtxSynchronize` aborted the process when a CUDA
+  device using that context was closed at exit, and in a longer run (pytest) every torch call on that GPU failed.
+  All 12 ordered pairs of {CUDA, Vulkan} × {GPU 0, GPU 1} (`python -m points_as_tori.knn_slang --pairs`) and the
+  runs in one process fit this rule; contexts created before the interop device were unaffected, and same-GPU
+  combinations passed. Mechanism not established (driver or slangpy). `get_device` therefore creates torch's
+  context on every GPU before the first Vulkan-interop device. `knn_slang.close_devices` (atexit, before slangpy's
+  own handler) synchronizes torch on the GPUs used and closes the devices in reverse creation order. The diagnostic
+  runs each configuration in its own process by default; `--same-process` and `--pairs` test combinations, and
+  after each step torch allocates and synchronizes on every GPU ("torch afterwards").
 - **Multi-GPU.** No masking needed: the slangpy device follows the torch device of the points (one slangpy device per
   torch device, cached). For Vulkan without torch, slang-rhi's default adapter is the first discrete GPU in Vulkan
   enumeration order, which need not be CUDA's device 0 (CUDA orders fastest first unless
@@ -347,6 +406,26 @@ The end-to-end difference comes from float32 network rounding (about 1e-6), whic
 | holey-bunny, 12917 points | 0.50 s | 5.96 s | 4.35 s |
 
 With all points as neighbors (10k queries, snail, float32) the times are comparable: C++ 3.22 s, port 3.31 s.
+
+## GPU validation
+
+- **Correctness on GPU:** `tests/points_as_tori/test_gpu_parity.py` runs the port on every visible CUDA device and on
+  the CPU and compares: tori, distance / gradient / Laplacian in k-NN, all-point, radius and outlier modes (float64
+  ≤ 1e-9 relative, float32 ≤ 1e-4), winding numbers (float64), the network's coefficients (float32 network, ≤ 1e-3),
+  PointsAsTori end to end on tooth.ply (sign agreement ≥ 0.999, 99th percentile |Δφ| ≤ 1e-3 of the bounding-box
+  diagonal), one training step (loss, gradients, weights), marching cubes (identical triangles), BVH queries
+  (identical k-NN sets, closest points, ray hits), and the absence of host synchronization in evaluation and the
+  network forward (`torch.cuda.set_sync_debug_mode('error')`, brute-force k-NN). The comparisons use the `'bvh'`
+  k-NN backend on both devices (same algorithm, exact). `pytest -s` prints the measured differences;
+  `PAT_PARITY_DEVICES=cuda:1` restricts the devices (`=cpu` runs CPU vs CPU, to check the tests without a GPU:
+  all differences 0 here).
+- **Timings:** `benchmarks/port_bench.py --device cuda:N [--dtype float64]` reports per stage: inference (k-NN,
+  network, torus fit) on tooth.ply and on N-point clouds, evaluation of Q queries (distance, + gradient,
+  + Laplacian), meshing (grid evaluation + marching cubes), one training step of the full-size network (batch of
+  1024 neighborhoods × 120 queries as the original; `--train-batch`). Not measured here on GPU. CPU reference
+  (4 threads, float32, tooth.ply, 2048 points): network incl. k-NN 3.66 s, torus fit 1 ms; 100k / 1M queries (k = 32)
+  distance 0.60 / 6.08 s, + gradient 0.81 / 6.96 s, + Laplacian 1.08 / 9.61 s; meshing 64³ 1.6 s, 128³ 23.9 s; a
+  training step of the full network at batch 32: 10.2 s (batch 1024 exceeded this machine's 15 GB).
 
 ## Running the tests
 

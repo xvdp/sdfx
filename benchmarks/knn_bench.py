@@ -15,9 +15,11 @@ Backends (each runs only if importable; all exact except where noted):
 	torch-bvh     points_as_tori.bvh: linear BVH built with torch, batched stack traversal (the port's 'bvh'),
 	              build time reported separately
 	slang         points_as_tori.knn_slang: the same BVH, fused Slang kernel, one thread per query (the port's
-	              'slang'; needs slangpy); upload of the BVH arrays reported as 'slang setup', kernel compiled in the
-	              warm-up run. CUDA tensors: slangpy's CUDA device on torch's context; CPU tensors: a Vulkan device
-	              with host copies (config.SLANG_DEVICE_TYPE / SLANG_ADAPTER select others)
+	              'slang'; needs slangpy), held set as a max-heap; upload of the BVH arrays reported as
+	              'slang setup', kernel compiled in the warm-up run. CUDA tensors: slangpy's CUDA device on torch's
+	              context; CPU tensors: a Vulkan device (a GPU, if any) with host copies, i.e. not the CPU
+	              (config.SLANG_DEVICE_TYPE / SLANG_ADAPTER select others)
+	slang-scan    the same kernel with the held set as an unsorted array (O(k) per update, as the GLSL shader)
 	faiss         faiss IndexFlatL2 (exact brute force with fused k-selection; GPU: GpuIndexFlatL2, k ≤ 2048)
 	keops         pykeops LazyTensor argKmin (exact brute force, reduction fused in registers, no Q×N matrix)
 	pytorch3d     pytorch3d.ops.knn_points (exact brute-force CUDA kernel)
@@ -86,6 +88,7 @@ def backends(device):
 
 	if knn_slang.available():
 		out['slang'] = None  # special-cased (reuses the torch-bvh BVH)
+		out['slang-scan'] = None
 	try:
 		import faiss
 
@@ -185,13 +188,14 @@ def main():
 						tb, bvh = timed(lambda: BVH(P), device, reps=1)
 						t, idx = timed(lambda: bvh.find_k_nearest(Q, k)[0], device, reps=1)
 						row['torch-bvh build'] = round(tb, 4)
-					elif name == 'slang':
+					elif name in ('slang', 'slang-scan'):
 						from points_as_tori.knn_slang import SlangKNN
 
+						variant = 'heap' if name == 'slang' else 'scan'
 						bvh = BVH(P) if bvh is None else bvh
-						ts, sk = timed(lambda: SlangKNN(P, bvh=bvh), device, reps=1)
+						ts, sk = timed(lambda: SlangKNN(P, bvh=bvh, variant=variant), device, reps=1)
 						t, idx = timed(lambda: sk.find_k_nearest(Q, k)[0], device, reps=2)
-						row['slang setup'] = round(ts, 4)
+						row[f'{name} setup'] = round(ts, 4)
 					else:
 						t, idx = timed(lambda: fn(P, Q, k), device, reps=1)
 					row[name] = round(t, 4)
