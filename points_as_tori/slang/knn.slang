@@ -4,7 +4,8 @@
 // argument is passed whole.
 //
 //   knn       held set as a max-heap (bvhKNearestNeighborsHeap, as the original C++ BVH): O(log k) per accepted
-//             candidate; heapsort at the end
+//             candidate; heapsort at the end; float
+//   knn_f64   the same in double (bounds, points, queries and distances in double; optional, config.SLANG_FLOAT64)
 //   knn_scan  held set as an unsorted array (bvhKNearestNeighbors, as sdfview/shaders/glsl/bvh.glsl and the original
 //             demo shader): O(k) per accepted candidate; insertion sort at the end
 //
@@ -15,17 +16,18 @@ module knn;
 import slangpy;
 import bvh;
 
-public void knn(int query_id, float3 query, Tensor<float, 2> bvh_bounds, Tensor<int, 2> bvh_nodes,
-                Tensor<int, 2> bvh_prims, Tensor<float, 2> points, int k, RWTensor<int, 2> out_indices,
-                RWTensor<float, 2> out_dists)
+// heap kernel in precision T: traversal, heapsort, ties by index, write row query_id (distances, not squared)
+void knnHeap<T : __BuiltinFloatingPointType>(int query_id, vector<T, 3> query, Tensor<T, 2> bvh_bounds,
+                                             Tensor<int, 2> bvh_nodes, Tensor<int, 2> bvh_prims, Tensor<T, 2> points,
+                                             int k, RWTensor<int, 2> out_indices, RWTensor<T, 2> out_dists)
 {
     int heap_i[BVH_K_MAX];
-    float heap_d[BVH_K_MAX];  // squared distances
-    int count = bvhKNearestNeighborsHeap(bvh_bounds, bvh_nodes, bvh_prims, points, query, k, heap_i, heap_d);
+    T heap_d[BVH_K_MAX];  // squared distances
+    int count = bvhKNearestNeighborsHeap<T>(bvh_bounds, bvh_nodes, bvh_prims, points, query, k, heap_i, heap_d);
 
     // heapsort: move the root (largest) to the end of the shrinking heap; ascending afterwards
     for (int end = count - 1; end > 0; end--) {
-        float d = heap_d[end];
+        T d = heap_d[end];
         int id = heap_i[end];
         heap_d[end] = heap_d[0];
         heap_i[end] = heap_i[0];
@@ -44,7 +46,7 @@ public void knn(int query_id, float3 query, Tensor<float, 2> bvh_bounds, Tensor<
     }
     // equal distances by index: insertion sort, O(count + inversions) on the distance-sorted array
     for (int i = 1; i < count; i++) {
-        float d = heap_d[i];
+        T d = heap_d[i];
         int id = heap_i[i];
         int j = i - 1;
         while (j >= 0 && heap_d[j] == d && heap_i[j] > id) {
@@ -60,6 +62,20 @@ public void knn(int query_id, float3 query, Tensor<float, 2> bvh_bounds, Tensor<
         out_indices[query_id, j] = heap_i[j];
         out_dists[query_id, j] = sqrt(heap_d[j]);
     }
+}
+
+public void knn(int query_id, float3 query, Tensor<float, 2> bvh_bounds, Tensor<int, 2> bvh_nodes,
+                Tensor<int, 2> bvh_prims, Tensor<float, 2> points, int k, RWTensor<int, 2> out_indices,
+                RWTensor<float, 2> out_dists)
+{
+    knnHeap<float>(query_id, query, bvh_bounds, bvh_nodes, bvh_prims, points, k, out_indices, out_dists);
+}
+
+public void knn_f64(int query_id, double3 query, Tensor<double, 2> bvh_bounds, Tensor<int, 2> bvh_nodes,
+                    Tensor<int, 2> bvh_prims, Tensor<double, 2> points, int k, RWTensor<int, 2> out_indices,
+                    RWTensor<double, 2> out_dists)
+{
+    knnHeap<double>(query_id, query, bvh_bounds, bvh_nodes, bvh_prims, points, k, out_indices, out_dists);
 }
 
 public void knn_scan(int query_id, float3 query, Tensor<float, 2> bvh_bounds, Tensor<int, 2> bvh_nodes,

@@ -135,24 +135,47 @@ public int bvhKNearestNeighbors(Tensor<float, 2> bvh_bounds, Tensor<int, 2> bvh_
     return count;
 }
 
+// Generic helpers of the heap kernel (float or double; the functions above mirror the GLSL in float only).
+public vector<T, 4> fetchRow4<T : __BuiltinFloatingPointType>(Tensor<T, 2> tex, int idx)
+{
+    return vector<T, 4>(tex[idx, 0], tex[idx, 1], tex[idx, 2], tex[idx, 3]);
+}
+
+public void fetchBVHNodeAABBT<T : __BuiltinFloatingPointType>(Tensor<T, 2> bvh_bounds, int nodeIdx,
+                                                               out vector<T, 3> aabb_min, out vector<T, 3> aabb_max)
+{
+    aabb_min = fetchRow4<T>(bvh_bounds, 2 * nodeIdx).xyz;
+    aabb_max = fetchRow4<T>(bvh_bounds, 2 * nodeIdx + 1).xyz;
+}
+
+public T pointAABBDistanceSqT<T : __BuiltinFloatingPointType>(vector<T, 3> point, vector<T, 3> aabb_min,
+                                                              vector<T, 3> aabb_max)
+{
+    vector<T, 3> diff = point - clamp(point, aabb_min, aabb_max);
+    return dot(diff, diff);
+}
+
 // k nearest points to `query` with the held set as a max-heap on squared distance (port of the original C++
 // BVH::find_k_nearest, src/cpp/bvh.cpp, std::priority_queue): heap_d[0] is the farthest held point, so the pruning
 // distance d_k² is read in O(1) and a closer candidate replaces the root and sifts down in O(log k), against O(k) for
-// the unsorted array of bvhKNearestNeighbors. Same traversal and pruning. Returns min(k, n); results in heap order
-// (not sorted); distances are squared. Loops are written out (no array arguments passed by value).
-public int bvhKNearestNeighborsHeap(Tensor<float, 2> bvh_bounds, Tensor<int, 2> bvh_nodes, Tensor<int, 2> bvh_prims,
-                                    Tensor<float, 2> points, float3 query, int k, out int heap_i[BVH_K_MAX],
-                                    out float heap_d[BVH_K_MAX])
+// the unsorted array of bvhKNearestNeighbors. Same traversal and pruning. Generic over the precision T (float or
+// double: bounds, points, query and distances in T). Returns min(k, n); results in heap order (not sorted);
+// distances are squared. Loops are written out (no array arguments passed by value).
+public int bvhKNearestNeighborsHeap<T : __BuiltinFloatingPointType>(Tensor<T, 2> bvh_bounds, Tensor<int, 2> bvh_nodes,
+                                                                    Tensor<int, 2> bvh_prims, Tensor<T, 2> points,
+                                                                    vector<T, 3> query, int k,
+                                                                    out int heap_i[BVH_K_MAX], out T heap_d[BVH_K_MAX])
 {
+    T infinity = T(INFINITY);
     for (int j = 0; j < BVH_K_MAX; j++) {
         heap_i[j] = -1;
-        heap_d[j] = INFINITY;
+        heap_d[j] = infinity;
     }
     k = min(k, BVH_K_MAX);
     if (k <= 0) return 0;
 
     int count = 0;
-    float kth_dist_sq = INFINITY;  // heap_d[0] once k are held
+    T kth_dist_sq = infinity;  // heap_d[0] once k are held
 
     int stack[BVH_STACK_SIZE];
     int stack_ptr = 0;
@@ -161,20 +184,20 @@ public int bvhKNearestNeighborsHeap(Tensor<float, 2> bvh_bounds, Tensor<int, 2> 
     while (stack_ptr > 0) {
         int node_idx = stack[--stack_ptr];
 
-        float3 aabb_min, aabb_max;
-        int left_idx, right_idx, prim_start, prim_count;
-        fetchBVHNode(bvh_bounds, bvh_nodes, node_idx, aabb_min, aabb_max, left_idx, right_idx, prim_start,
-                     prim_count);
+        vector<T, 3> aabb_min, aabb_max;
+        fetchBVHNodeAABBT<T>(bvh_bounds, node_idx, aabb_min, aabb_max);
+        int4 node = fetch_texel(bvh_nodes, node_idx);
+        int left_idx = node.x, right_idx = node.y, prim_start = node.z, prim_count = node.w;
 
-        if (count >= k && pointAABBDistanceSq(query, aabb_min, aabb_max) > kth_dist_sq) {
+        if (count >= k && pointAABBDistanceSqT<T>(query, aabb_min, aabb_max) > kth_dist_sq) {
             continue;
         }
 
         if (prim_count > 0) {
             for (int i = 0; i < prim_count; i++) {
                 int prim_idx = bvh_prims[prim_start + i, 0];
-                float3 point = fetch_texel(points, prim_idx).xyz;
-                float dist_sq = dot(query - point, query - point);
+                vector<T, 3> point = fetchRow4<T>(points, prim_idx).xyz;
+                T dist_sq = dot(query - point, query - point);
 
                 if (count < k) {
                     // push: sift up from the new last slot
@@ -207,14 +230,14 @@ public int bvhKNearestNeighborsHeap(Tensor<float, 2> bvh_bounds, Tensor<int, 2> 
                 }
             }
         } else {
-            float3 left_min, left_max, right_min, right_max;
-            fetchBVHNodeAABB(bvh_bounds, left_idx, left_min, left_max);
-            fetchBVHNodeAABB(bvh_bounds, right_idx, right_min, right_max);
-            float left_dist_sq = pointAABBDistanceSq(query, left_min, left_max);
-            float right_dist_sq = pointAABBDistanceSq(query, right_min, right_max);
+            vector<T, 3> left_min, left_max, right_min, right_max;
+            fetchBVHNodeAABBT<T>(bvh_bounds, left_idx, left_min, left_max);
+            fetchBVHNodeAABBT<T>(bvh_bounds, right_idx, right_min, right_max);
+            T left_dist_sq = pointAABBDistanceSqT<T>(query, left_min, left_max);
+            T right_dist_sq = pointAABBDistanceSqT<T>(query, right_min, right_max);
 
             int near_idx = left_idx, far_idx = right_idx;
-            float near_dist_sq = left_dist_sq, far_dist_sq = right_dist_sq;
+            T near_dist_sq = left_dist_sq, far_dist_sq = right_dist_sq;
             if (left_dist_sq >= right_dist_sq) {  // ties: right first, as in the original
                 near_idx = right_idx; far_idx = left_idx;
                 near_dist_sq = right_dist_sq; far_dist_sq = left_dist_sq;

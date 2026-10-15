@@ -47,6 +47,10 @@ KNN_BVH_MIN_POINTS: int = 32768
 # devices not tied to a torch CUDA device (CPU tensors); None = slangpy's default (first discrete GPU).
 SLANG_DEVICE_TYPE: Optional[str] = None
 SLANG_ADAPTER: Optional[str] = None
+# Precision of the Slang k-NN kernel for float64 geometry: False (default) selects neighbors with float32 distances
+# (exact up to float32 near-ties); True runs the heap kernel in float64 (consumer GPUs run float64 at a fraction of
+# the float32 rate; Vulkan needs the shaderFloat64 feature).
+SLANG_FLOAT64: bool = False
 
 
 def set_device(device: Union[str, torch.device], dtype: torch.dtype = torch.float32, force: bool = False) -> None:

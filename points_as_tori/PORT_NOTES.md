@@ -161,6 +161,9 @@ one dispatch per chunk of ≤ 2²⁰ queries, independent of the tree depth.
 - **Precision.** float32, distances from differences Σ (q_c − p_c)² (no |q|² + |p|² − 2 q·p cancellation). The
   returned set can differ from the float64 one only where two candidate distances differ by less than float32
   rounding of the coordinates. For float64 queries the returned distances are recomputed in float64 from the indices.
+  Optional: `config.SLANG_FLOAT64 = True` runs the heap kernel in double for float64 geometry (`knn_f64`, the same
+  generic Slang code instantiated for double): sets and distances equal to the float64 torch BVH (distances ≤ 1e-12,
+  tested on lavapipe). Off by default; float64 runs at a fraction of the float32 rate on consumer GPUs.
 - **Sizes.** Link-time constants per call: `BVH_K_MAX` = k rounded up to a power of two (≥ 8; per-thread arrays),
   `BVH_STACK_SIZE` = BVH depth + 2 rounded up to 8 (a depth-first traversal that pushes both children of each
   popped node holds ≤ depth + 1 entries, so the stack guard never drops a node). One compiled kernel per pair, cached

@@ -189,3 +189,20 @@ def test_auto_falls_back_when_slang_unusable(monkeypatch):
 	assert td._knn_backend(100, torch.device('cpu')) == 'brute'
 	monkeypatch.setattr(config, 'KNN_BACKEND', 'slang')
 	assert td._knn_backend(100, torch.device('cpu')) == 'slang'
+
+
+def test_float64_kernel_matches_torch_bvh(slang_device, monkeypatch):
+	"""config.SLANG_FLOAT64: the heap kernel in double gives the float64 torch BVH's neighbors and distances."""
+	from points_as_tori.knn_slang import SlangKNN
+
+	monkeypatch.setattr(config, 'SLANG_FLOAT64', True)
+	P = pat.as_wide(cloud(4000, seed=11), 3)
+	Q = pat.as_wide(np.random.default_rng(12).normal(size=(2000, 3)), 3)
+	s = SlangKNN(P)
+	assert s.real == torch.float64
+	idx, dist = s.find_k_nearest(Q, 24)
+	ref_idx, ref_dist = s.bvh.find_k_nearest(Q, 24)
+	assert torch.equal(idx.sort(dim=1).values, ref_idx.sort(dim=1).values)
+	assert float((dist - ref_dist).abs().max()) <= 1e-12
+	monkeypatch.setattr(config, 'SLANG_FLOAT64', False)
+	assert SlangKNN(P).real == torch.float32
