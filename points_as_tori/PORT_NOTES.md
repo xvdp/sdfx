@@ -422,7 +422,10 @@ With all points as neighbors (10k queries, snail, float32) the times are compara
 - **Timings:** `benchmarks/port_bench.py --device cuda:N [--dtype float64]` reports per stage: inference (k-NN,
   network, torus fit) on tooth.ply and on N-point clouds, evaluation of Q queries (distance, + gradient,
   + Laplacian), meshing (grid evaluation + marching cubes), one training step of the full-size network (batch of
-  1024 neighborhoods × 120 queries as the original; `--train-batch`). Not measured here on GPU.
+  1024 neighborhoods × 120 queries as the original; `--train-batch`). Not measured here on GPU. CPU reference
+  (4 threads, float32, tooth.ply, 2048 points): network incl. k-NN 3.66 s, torus fit 1 ms; 100k / 1M queries (k = 32)
+  distance 0.60 / 6.08 s, + gradient 0.81 / 6.96 s, + Laplacian 1.08 / 9.61 s; meshing 64³ 1.6 s, 128³ 23.9 s; a
+  training step of the full network at batch 32: 10.2 s (batch 1024 exceeded this machine's 15 GB).
 
 ## Running the tests
 

@@ -111,5 +111,7 @@ rejection, the bulge = 0 warning, and the grid bake into an `.sdfx` scene. Not d
 
 - Native GLSL for the assembly in sdfview (SuperFit generates it through sysl; its shader modules are Adobe-licensed,
   so they would be generated at run time from the user's SuperFit checkout rather than stored here).
-- Comparison tooling (Points as Tori vs SuperFit on the same meshes: IoU, Chamfer, normal consistency, timing),
-  ideally with SuperFit's metric definitions (`algos/eval_tools.py`) for comparability.
+- Comparison: `experiments/compare_pat_sup.py` runs both models on the same meshes (SuperFit's normalized frame;
+  ground truth from cubvh 'raystab' as SuperFit, or the generalized winding number) and reports IoU@R, surface IoU,
+  Chamfer@2048, SDF error and normal agreement with SuperFit's definitions where they apply; validated here on
+  knot.obj (ground truth against itself: IoU 1, SDF error 0, Chamfer floor 0.11 from the 2048-point sampling).
