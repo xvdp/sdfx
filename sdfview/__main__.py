@@ -5,12 +5,14 @@ Command line:
 	python -m sdfview view SCENE.sdfx [--up z] [--size 1280 800] [--window pyglet|glfw]
 	python -m sdfview render SCENE.sdfx -o IMAGE.png [--size 800 600] [--surface pat|grid|NAME] [--points] ...
 	python -m sdfview info SCENE.sdfx
+	python -m sdfview merge A.sdfx B.sdfx -o AB.sdfx --names pat sup   # one scene, models toggled / overlaid
 """
 
 from __future__ import annotations
 
 import argparse
 import math
+import os
 import time
 
 
@@ -28,6 +30,8 @@ def _settings(a):
 		clip_surface=a.clip,
 		isovalue=a.isovalue,
 		k=a.k,
+		surface_mode='overlay' if a.overlay else 'single',
+		overlay_opacity=a.opacity,
 	)
 
 
@@ -35,6 +39,8 @@ def _view_args(p):
 	p.add_argument('--up', default='y', choices=['x', 'y', 'z'], help='world up axis for the orbit camera')
 	p.add_argument('--surface', default='auto', help="surface field: name, 'pat', 'grid' or 'auto' (grid if any)")
 	p.add_argument('--cut-field', default='auto', help="cut plane field: name, 'pat', 'grid' or 'auto' (exact field)")
+	p.add_argument('--overlay', action='store_true', help='draw every model of a merged scene (key V)')
+	p.add_argument('--opacity', type=float, default=1.0, help='opacity of the other models in overlay (key T)')
 	p.add_argument('--no-surface', action='store_true')
 	p.add_argument('--no-cut', action='store_true')
 	p.add_argument('--points', action='store_true', help='draw the point cloud')
@@ -114,6 +120,17 @@ def cmd_render(a):
 	print(f'wrote {a.output} ({a.size[0]}x{a.size[1]}, {time.perf_counter() - t:.2f} s)')
 
 
+def cmd_merge(a):
+	from .scene import Scene, merge_scenes
+
+	names = a.names or [os.path.splitext(os.path.basename(p))[0] for p in a.scenes]
+	if len(names) != len(a.scenes) or len(set(names)) != len(names):
+		raise SystemExit('--names: one distinct name per scene')
+	scene = merge_scenes({n: Scene.load(p) for n, p in zip(names, a.scenes)})
+	scene.save(a.output)
+	print(f'wrote {a.output}: {scene}')
+
+
 def cmd_info(a):
 	from .scene import Scene
 
@@ -122,7 +139,8 @@ def cmd_info(a):
 	for name, arr in scene.arrays.items():
 		print(f'  {name:28s} {str(arr.dtype):8s} {tuple(arr.shape)}')
 	for f in scene.fields:
-		print(f'  field {f["name"]} ({f["type"]}): {f.get("params", {})}')
+		model = f' model {f["model"]}' if 'model' in f else ''
+		print(f'  field {f["name"]} ({f["type"]}{model}): {f.get("params", {})}')
 
 
 def main(argv=None):
@@ -171,6 +189,12 @@ def main(argv=None):
 	p.add_argument('--zoom', type=float, default=0.0, help='zoom steps (each 10%% closer)')
 	_view_args(p)
 	p.set_defaults(func=cmd_render)
+
+	p = sub.add_parser('merge', help='several scenes -> one scene with one model per input (toggle / overlay)')
+	p.add_argument('scenes', nargs='+')
+	p.add_argument('-o', '--output', required=True)
+	p.add_argument('--names', nargs='+', help='model names (default: file names), e.g. pat sup gt')
+	p.set_defaults(func=cmd_merge)
 
 	p = sub.add_parser('info', help='print the manifest summary')
 	p.add_argument('scene')

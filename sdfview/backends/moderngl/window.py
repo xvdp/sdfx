@@ -20,6 +20,7 @@ HELP = """\
   mouse   left drag: orbit · right/middle drag: pan · wheel: zoom
   keys    S surface · C cut plane · P points · X/Y/Z cut axis · ↑/↓ move cut plane (shift: faster)
           K clip surface at the plane · B cut plane opacity · G / F cycle the surface / cut-plane field
+          V overlay all models (G picks the opaque one) · T overlay transparency
           I / O isovalue ∓ · N / M neighbors k ∓ · 1-4 resolution while dragging (1 = full) · R reset view
           H help · Esc quit"""
 
@@ -135,6 +136,10 @@ class ViewerWindow(mglw.WindowConfig):
 			v.surface_field = fields[(fields.index(v.surface_field) + 1) % len(fields)]
 		elif key == keys.F:
 			v.cut_field = fields[(fields.index(v.cut_field) + 1) % len(fields)]
+		elif key == keys.V:
+			v.surface_mode = 'single' if v.surface_mode == 'overlay' else 'overlay'
+		elif key == keys.T:
+			v.overlay_opacity = 0.45 if v.overlay_opacity >= 1.0 else 1.0
 		elif key in (keys.I, keys.O):
 			v.isovalue += (-1 if key == keys.I else 1) * 0.005 * self.renderer.diagonal * (5 if modifiers.shift else 1)
 		elif key in (keys.N, keys.M):
@@ -159,8 +164,11 @@ class ViewerWindow(mglw.WindowConfig):
 		v = self.view
 		surf = self.renderer.resolve_field(v.surface_field, True)
 		cut = self.renderer.resolve_field(v.cut_field, False)
+		overlay = ''
+		if v.surface_mode == 'overlay' and len(self.renderer.models()) > 1:
+			overlay = f' + overlay{" (translucent)" if v.overlay_opacity < 1 else ""}'
 		parts = [
-			f'surface: {surf["name"] if (surf and v.show_surface) else "off"}',
+			f'surface: {surf["name"] if (surf and v.show_surface) else "off"}{overlay}',
 			f'cut: {cut["name"] if (cut and v.show_cutplane) else "off"} axis {"xyz"[v.cut_axis]} {v.cut_offset:+.2f}',
 			f'iso {v.isovalue:+.4f}',
 			f'k {v.k or self._scene_k()}',

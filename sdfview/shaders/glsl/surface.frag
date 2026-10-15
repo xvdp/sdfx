@@ -4,7 +4,8 @@
 // or a sign change between two samples, refined by bisection (robust to steps that overshoot the surface).
 // Optional clip half-space n·x ≤ c: the ray segment is restricted to it. A ray that enters the solid at the clip
 // plane marches on to the far side of the solid (the cut plane, drawn at the same place, covers that opening).
-// Shading: Blinn-Phong with a head light; front and back faces (seen from inside) get different colors.
+// Shading: Blinn-Phong with a head light; front and back faces (seen from inside) get different colors; alpha =
+// u_opacity (the renderer blends passes with u_opacity < 1 without writing depth).
 #include "common.glsl"
 #include "camera.glsl"
 #include "field.glsl"
@@ -18,6 +19,7 @@ uniform bool u_clip;
 uniform vec4 u_clip_plane;  // (n, c): keep n·x <= c
 uniform vec3 u_color_front;
 uniform vec3 u_color_back;
+uniform float u_opacity;  // < 1: blended pass (overlay of several models)
 
 layout(location = 0) out vec4 frag_color;
 
@@ -80,6 +82,6 @@ void main() {
     vec3 p = ro + t * rd;
     vec3 g;
     fieldDistanceGradient(p, g);
-    frag_color = vec4(shade(p, normalize(g), rd), 1.0);
+    frag_color = vec4(shade(p, normalize(g), rd), u_opacity);
     gl_FragDepth = fragDepth(p);
 }

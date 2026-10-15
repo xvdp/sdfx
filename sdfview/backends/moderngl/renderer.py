@@ -6,8 +6,8 @@ moderngl-window / pyglet / glfw / Qt window, or a context created by another app
 (moderngl.create_context()). `draw()` renders into the framebuffer bound by the caller; `render()` renders offscreen
 and returns an image; `probe()` / `probe_knn()` evaluate the GLSL field / neighbor search at given points.
 
-Passes (all with depth test): surface (sphere tracing, writes gl_FragDepth), cut plane (rasterized rectangle,
-field colormap), points (sprites). Programs are compiled on first use per (stage pair, field), so the surface can
+Passes (all with depth test): opaque surfaces (sphere tracing, writes gl_FragDepth), cut plane (rasterized
+rectangle, field colormap), points (sprites), translucent surfaces (overlay of several models: blended, no depth write). Programs are compiled on first use per (stage pair, field), so the surface can
 use a grid bake while the cut plane uses the exact field.
 """
 
@@ -20,11 +20,15 @@ import moderngl
 import numpy as np
 
 from ...camera import OrbitCamera
-from ...scene import Scene
+from ...scene import Scene, model_of
 from ...settings import ViewSettings, cut_plane
 from ...shaders import glsl_source
 
 TEXTURE_WIDTH = 4096  # texels per row of array textures (>= the WebGL2 minimum for MAX_TEXTURE_SIZE)
+
+# surface colors of models (scenes with several models: sdfview.scene.merge_scenes)
+MODEL_COLORS = {'pat': (0.86, 0.70, 0.45), 'sup': (0.42, 0.62, 0.90), 'gt': (0.72, 0.72, 0.72)}
+EXTRA_COLORS = [(0.52, 0.78, 0.50), (0.80, 0.55, 0.82), (0.92, 0.55, 0.45), (0.45, 0.80, 0.80)]
 
 
 def array_texture(ctx: moderngl.Context, array: np.ndarray, width: int = TEXTURE_WIDTH) -> moderngl.Texture:
@@ -144,6 +148,30 @@ class Renderer:
 			unit += 1
 		return unit
 
+	def models(self) -> list:
+		"""Model names of the fields, in field order (a field without a "model" key is its own model)."""
+		out = []
+		for f in self.scene.fields:
+			if model_of(f) not in out:
+				out.append(model_of(f))
+		return out
+
+	def model_field(self, model: str, for_surface: bool = True) -> Optional[dict]:
+		"""The field drawn for a model: its grid for surfaces (fast to trace), its exact field for the cut plane."""
+		fields = [f for f in self.scene.fields if model_of(f) == model]
+		grids = [f for f in fields if f['type'] == 'grid']
+		exact = [f for f in fields if f['type'] != 'grid']
+		order = (grids + exact) if for_surface else (exact + grids)
+		return order[0] if order else None
+
+	def model_color(self, model: str, settings: ViewSettings):
+		if settings.model_colors and model in settings.model_colors:
+			return tuple(settings.model_colors[model])
+		if model in MODEL_COLORS:
+			return MODEL_COLORS[model]
+		others = [m for m in self.models() if m not in MODEL_COLORS]
+		return EXTRA_COLORS[others.index(model) % len(EXTRA_COLORS)] if model in others else EXTRA_COLORS[0]
+
 	def resolve_field(self, which: str, for_surface: bool) -> Optional[dict]:
 		if which != 'auto':
 			f = self.scene.field(which)
@@ -182,22 +210,10 @@ class Renderer:
 		n, c, origin, u, v = cut_plane(s, self.box_min, self.box_max)
 		eps = s.epsilon if s.epsilon is not None else 1e-4 * self.diagonal
 
-		surface_field = self.resolve_field(s.surface_field, True)
-		if s.show_surface and surface_field is not None:
-			prog, vao = self.program('fullscreen.vert', 'surface.frag', surface_field)
-			self._bind_field(prog, surface_field, s)
-			for k, val in cam.items():
-				_set(prog, k, val)
-			_set(prog, 'u_box_min', self.box_min)
-			_set(prog, 'u_box_max', self.box_max)
-			_set(prog, 'u_max_steps', int(s.max_steps))
-			_set(prog, 'u_epsilon', float(eps))
-			_set(prog, 'u_step_scale', float(s.step_scale))
-			_set(prog, 'u_clip', bool(s.clip_surface and s.show_cutplane))
-			_set(prog, 'u_clip_plane', (*n, c))
-			_set(prog, 'u_color_front', s.color_front)
-			_set(prog, 'u_color_back', s.color_back)
-			vao.render(moderngl.TRIANGLES, vertices=3)
+		passes = self.surface_passes(s)
+		for field, color_front, color_back, opacity in passes:
+			if opacity >= 1.0:
+				self._draw_surface(field, s, cam, (*n, c), eps, color_front, color_back, 1.0)
 
 		cut_field = self.resolve_field(s.cut_field, False)
 		if s.show_cutplane and cut_field is not None:
@@ -234,6 +250,57 @@ class Renderer:
 				_set(prog, 'u_point_radius', float(s.point_radius or pc.get('radius', 0.005)))
 				_set(prog, 'u_point_color', s.point_color)
 				vao.render(moderngl.POINTS, vertices=int(self.scene.arrays[pc['positions']].shape[0]))
+
+		# translucent surfaces last, blended over everything drawn so far, without writing depth
+		translucent = [p for p in passes if p[3] < 1.0]
+		if translucent:
+			ctx.enable(moderngl.BLEND)
+			ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+			fbo.depth_mask = False
+			for field, color_front, color_back, opacity in translucent:
+				self._draw_surface(field, s, cam, (*n, c), eps, color_front, color_back, opacity)
+			fbo.depth_mask = True
+			ctx.disable(moderngl.BLEND)
+
+	def surface_passes(self, s: ViewSettings) -> list:
+		"""
+		[(field, color_front, color_back, opacity)] of the surfaces to draw: surface_field alone ('single'), or one field
+		per model ('overlay': surface_field's model opaque, the others with overlay_opacity). With several models in
+		the scene, each surface takes its model's color.
+		"""
+		primary = self.resolve_field(s.surface_field, True)
+		if not s.show_surface or primary is None:
+			return []
+		models = self.models()
+		fields = [(primary, 1.0)]
+		if s.surface_mode == 'overlay':
+			fields += [(self.model_field(m), float(s.overlay_opacity)) for m in models if m != model_of(primary)]
+		out = []
+		for field, opacity in fields:
+			if len(models) > 1:
+				front = self.model_color(model_of(field), s)
+				back = tuple(0.55 * x for x in front)
+			else:
+				front, back = tuple(s.color_front), tuple(s.color_back)
+			out.append((field, front, back, opacity))
+		return out
+
+	def _draw_surface(self, field, s: ViewSettings, cam: dict, clip_plane, eps, color_front, color_back, opacity):
+		prog, vao = self.program('fullscreen.vert', 'surface.frag', field)
+		self._bind_field(prog, field, s)
+		for k, val in cam.items():
+			_set(prog, k, val)
+		_set(prog, 'u_box_min', self.box_min)
+		_set(prog, 'u_box_max', self.box_max)
+		_set(prog, 'u_max_steps', int(s.max_steps))
+		_set(prog, 'u_epsilon', float(eps))
+		_set(prog, 'u_step_scale', float(s.step_scale))
+		_set(prog, 'u_clip', bool(s.clip_surface and s.show_cutplane))
+		_set(prog, 'u_clip_plane', clip_plane)
+		_set(prog, 'u_color_front', color_front)
+		_set(prog, 'u_color_back', color_back)
+		_set(prog, 'u_opacity', float(opacity))
+		vao.render(moderngl.TRIANGLES, vertices=3)
 
 	def render(self, camera: OrbitCamera, settings: Optional[ViewSettings] = None, size=(800, 600)) -> np.ndarray:
 		"""Offscreen render -> (height, width, 4) uint8 RGBA, first row = top of the image."""

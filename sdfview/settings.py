@@ -16,6 +16,13 @@ class ViewSettings:
 	show_points: bool = False
 	surface_field: str = 'auto'  # field name or type; 'auto': a grid if the scene has one (fast), else the first field
 	cut_field: str = 'auto'  # 'auto': the first non-grid field (exact), else the grid
+	# several models in one scene (fields with a "model" key, sdfview.scene.merge_scenes):
+	#   'single'   the surface of surface_field only (toggle between models by changing it)
+	#   'overlay'  every model's surface (one field per model, its grid if it has one), each in its model's color;
+	#              surface_field's model is drawn opaque, the others with overlay_opacity
+	surface_mode: str = 'single'
+	overlay_opacity: float = 1.0  # < 1: the other models blend over (no depth write), so surfaces behind stay visible
+	model_colors: Optional[dict] = None  # {model: (r, g, b)}; default: palette (pat tan, sup blue, gt grey, ...)
 
 	# level set / field
 	isovalue: float = 0.0

@@ -92,3 +92,22 @@ def test_javascript_reader(tmp_path):
 	for name, a in s.arrays.items():
 		assert res['arrays'][name]['shape'] == list(a.shape)
 		np.testing.assert_array_equal(np.array(res['arrays'][name]['values'], dtype=a.dtype), a.ravel())
+
+
+def test_merge_scenes(tmp_path):
+	from sdfview.scene import merge_scenes, model_of
+
+	a, b = make_scene(), Scene([0, 0, 0], [5, 5, 5], meta={'note': 'b'})
+	grid_field(b, 'only', np.zeros((2, 2, 2)), [0, 0, 0], [5, 5, 5])
+	m = merge_scenes({'pat': a, 'sup': b})
+	path = os.path.join(tmp_path, 'm.sdfx')
+	m.save(path)
+	m = Scene.load(path)
+	assert [f['name'] for f in m.fields] == ['pat.f', 'pat.g', 'sup']  # a scene with one field keeps the model name
+	assert [model_of(f) for f in m.fields] == ['pat', 'pat', 'sup']
+	assert m.fields[1]['arrays']['values'] == 'pat/g/values' and 'sup/only/values' in m.arrays
+	assert np.array_equal(m.arrays['pat/a/f'], a.arrays['a/f'])
+	assert m.pointclouds[0]['name'] == 'pat.pc' and m.pointclouds[0]['positions'] == 'pat/a/f'
+	assert m.bounds_min == [-1, -2, -3] and m.bounds_max == [5, 5, 5]
+	assert m.meta['models'] == {'pat': {'note': 'test'}, 'sup': {'note': 'b'}}
+	assert model_of({'name': 'x'}) == 'x'
