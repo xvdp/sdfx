@@ -17,7 +17,8 @@ PAT trains once and then predicts. SUP optimizes per shape
 | Dependencies | flax nnx, optax, nanoflann, libigl, fcpw | cubvh, kaolin, geolipi, sysl (generates GLSL) |
 
 ## Licenses
-SUP is mostly Adobe Research License: non-commercial use only, and derivative works must carry the same restriction.
+* PAT is MIT. [LICENSE](ext/points-as-tori/LICENSE)
+* SUP as two licenses an [MIT License](ext/superfit/LICENSE-MIT) and an [Adobe Research Non Commercial](ext/superfit/LICENSE). While Superfit's particular method has been made non commercial, the idea of fitting the complexity of the world with primitive SDFs is prior art.
 
 # PAT port
 
@@ -54,7 +55,7 @@ Requirements (`pyproject.toml`): Python >= 3.9, torch >= 2.1, numpy, plyfile. Te
 ### Slang k-NN kernel (optional)
 ```bash
 sudo apt update && sudo apt install libvulkan1
-pip install -e ".[slang]"` adds slangpy. 
+pip install -e ".[slang]" # adds slangpy. 
 # optional, faster torch binding (C++ compiler needed, builds against your torch); 
 # without it slangpy uses a Python fallback, about microseconds per call here:
 pip install slangpy-torch --no-build-isolation
@@ -158,11 +159,23 @@ r.draw(OrbitCamera.fit(r.box_min, r.box_max), ViewSettings(show_points=True), vi
 pytest tests                       # port-only tests; reference tests are skipped
 
 # with the references (original JAX code + original C++ built as a Python module); needs Python >= 3.11, cmake and a C++17 compiler with OpenMP
+# FIX pyproject.toml to your cuda device, it now reads jax[cuda12]==0.8.2
 pip install -e ".[reference]"
+rm -rf build/pat_reference
 cmake -S tests/points_as_tori/reference -B build/pat_reference \
       -Dnanobind_DIR=$(python -m nanobind --cmake_dir) -DPython_EXECUTABLE=$(which python)
 cmake --build build/pat_reference
 PAT_REFERENCE_DIR=build/pat_reference pytest tests -s     # -s prints the measured differences
+
+pytest tests/points_as_tori/test_knn_slang.py -v         # cpu, cuda:0, cuda:0/vulkan, cuda:1, cuda:1/vulkan
+python benchmarks/knn_bench.py --device cuda:0 --backends torch-brute torch-bvh slang
+python benchmarks/knn_bench.py --device cuda:1 --backends torch-bvh slang
 ```
 
+
+### SUP (SuperFit)
+`superfit_sdf/` evaluates SuperFit primitive assemblies (`primitive_assembly.pkl`) as torch SDFs by importing SuperFit
+at run time (Adobe Research License; nothing copied here). `pip install -e ".[superfit]"`, then
+`python -m sdfview superfit A.pkl -o A.sdfx --view`. Same-data comparison of PAT and SUP:
+`python experiments/compare_pat_sup.py --help` (details: superfit_sdf/NOTES.md).
 
