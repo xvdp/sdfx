@@ -407,6 +407,26 @@ The end-to-end difference comes from float32 network rounding (about 1e-6), whic
 
 With all points as neighbors (10k queries, snail, float32) the times are comparable: C++ 3.22 s, port 3.31 s.
 
+## GPU validation
+
+- **Correctness on GPU:** `tests/points_as_tori/test_gpu_parity.py` runs the port on every visible CUDA device and on
+  the CPU and compares: tori, distance / gradient / Laplacian in k-NN, all-point, radius and outlier modes (float64
+  ≤ 1e-9 relative, float32 ≤ 1e-4), winding numbers (float64), the network's coefficients (float32 network, ≤ 1e-3),
+  PointsAsTori end to end on tooth.ply (sign agreement ≥ 0.999, 99th percentile |Δφ| ≤ 1e-3 of the bounding-box
+  diagonal), one training step (loss, gradients, weights), marching cubes (identical triangles), BVH queries
+  (identical k-NN sets, closest points, ray hits), and the absence of host synchronization in evaluation and the
+  network forward (`torch.cuda.set_sync_debug_mode('error')`, brute-force k-NN). The comparisons use the `'bvh'`
+  k-NN backend on both devices (same algorithm, exact). `pytest -s` prints the measured differences;
+  `PAT_PARITY_DEVICES=cuda:1` restricts the devices (`=cpu` runs CPU vs CPU, to check the tests without a GPU:
+  all differences 0 here).
+- **Timings:** `benchmarks/port_bench.py --device cuda:N [--dtype float64]` reports per stage: inference (k-NN,
+  network, torus fit) on tooth.ply and on N-point clouds, evaluation of Q queries (distance, + gradient,
+  + Laplacian), meshing (grid evaluation + marching cubes), one training step of the full-size network (batch of
+  1024 neighborhoods × 120 queries as the original; `--train-batch`). Not measured here on GPU. CPU reference
+  (4 threads, float32, tooth.ply, 2048 points): network incl. k-NN 3.66 s, torus fit 1 ms; 100k / 1M queries (k = 32)
+  distance 0.60 / 6.08 s, + gradient 0.81 / 6.96 s, + Laplacian 1.08 / 9.61 s; meshing 64³ 1.6 s, 128³ 23.9 s; a
+  training step of the full network at batch 32: 10.2 s (batch 1024 exceeded this machine's 15 GB).
+
 ## Running the tests
 
 See the repository README (Install, Tests). Tests that compare against the original JAX code (jax 0.8.2 / flax 0.12.2, Python >= 3.11) or the original C++ (`tests/points_as_tori/reference`, CGAL optional) are skipped when those are not available.
