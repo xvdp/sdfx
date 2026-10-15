@@ -11,6 +11,7 @@ Command line:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import time
@@ -141,6 +142,12 @@ def cmd_info(a):
 	for f in scene.fields:
 		model = f' model {f["model"]}' if 'model' in f else ''
 		print(f'  field {f["name"]} ({f["type"]}{model}): {f.get("params", {})}')
+	meta = dict(scene.meta)
+	models = meta.pop('models', {})
+	if meta:
+		print(f'  meta {json.dumps(meta, default=str)}')
+	for model, m in models.items():
+		print(f'  meta of {model}: {json.dumps(m, default=str)}')
 
 
 def main(argv=None):
