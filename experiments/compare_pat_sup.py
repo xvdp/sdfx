@@ -134,7 +134,8 @@ class GroundTruth:
 
 
 def surface_samples(vertices, faces, n: int, seed: int):
-	"""(points (3, n), unit face normals (3, n)), uniform by area."""
+	"""vertices (V, 3), faces (F, 3) (NumPy, or torch on the device) -> (points (3, n), unit face normals (3, n)) on
+	the device, uniform by area."""
 	mesh = TriangleMesh(vertices, faces)
 	p, nrm = mesh.sample_points_and_normals_uniformly(n, seed=seed)
 	return p, nrm / nrm.norm(dim=0, keepdim=True).clamp_min(1e-12)
@@ -203,12 +204,11 @@ def model_metrics(fn, gt, ctx: dict) -> dict:
 
 	if bool(occ.any()) and not bool(occ.all()):
 		axis = ctx['axis']
-		v, f = marching_cubes(values.reshape(res, res, res), axis[[0, 0, 0]], axis[[-1, -1, -1]], 0.0)
-		v_np, f_np = config.to_numpy(v).astype(np.float64), config.to_numpy(f).astype(np.int64)  # (V, 3), (F, 3)
-		out['triangles'] = int(f_np.shape[0])
-		model_points, _ = surface_samples(v_np, f_np, CHAMFER_POINTS, seed + 1)
+		v, f = marching_cubes(values.reshape(res, res, res), axis[[0, 0, 0]], axis[[-1, -1, -1]], 0.0)  # (3, V), (3, F)
+		out['triangles'] = int(f.shape[1])
+		model_points, _ = surface_samples(v.T, f.T, CHAMFER_POINTS, seed + 1)  # (n, 3) views: stays on the device
 		out['cd_x100'] = chamfer_x100(model_points, ctx['gt_chamfer'])
-		pp, pn = surface_samples(v_np, f_np, NEAR_SURFACE_POINTS, seed + 3)
+		pp, pn = surface_samples(v.T, f.T, NEAR_SURFACE_POINTS, seed + 3)
 		pred_near = near_surface(pp, pn, seed + 4)
 		out['iou_pred_surface'] = iou(evaluate_chunked(fn, pred_near) <= 0, evaluate_chunked(gt, pred_near) <= 0)
 		out['bidir_surface_iou'] = (out['iou_gt_surface'] + out['iou_pred_surface']) / 2
@@ -226,7 +226,7 @@ def run_pat(vertices, faces, n_points: int, seed: int, noise: float):
 		gen = torch.Generator(device='cpu').manual_seed(seed + 10)
 		p = p + noise * torch.randn(p.shape, generator=gen, dtype=p.dtype).to(p.device)
 	t = time.perf_counter()
-	sdf = pat.PointsAsTori(config.to_numpy(p), config.to_numpy(n))  # (n, 3)
+	sdf = pat.PointsAsTori(p.T, n.T)  # (n, 3) views of the (3, n) device tensors: no copy, no host transfer
 	if p.is_cuda:
 		torch.cuda.synchronize(p.device)
 	return sdf, time.perf_counter() - t

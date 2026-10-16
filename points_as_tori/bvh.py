@@ -877,8 +877,9 @@ class BVH:
 	def find_primitives_in_box(self, box_min: torch.Tensor, box_max: torch.Tensor) -> torch.Tensor:
 		"""
 		Primitives of the leaves whose boxes (and all ancestors' boxes) intersect the query box (C++ semantics: a
-		candidate set; it depends on the leaves, so it differs from the original's tree). Breadth-first, one host
-		read per level.
+		candidate set; it depends on the leaves, so it differs from the original's tree). Breadth-first; per level a
+		fixed number of host reads (output sizes of the masks and of the leaf expansion), independent of the number
+		of leaves.
 		"""
 		t = self.tree
 		frontier = torch.zeros(1, dtype=torch.long, device=self.device)
@@ -888,9 +889,15 @@ class BVH:
 			hit = ((bmin <= box_max[:, None]) & (bmax >= box_min[:, None])).all(dim=0)
 			frontier = frontier[hit]
 			leaf = t.prim_count[frontier] > 0
-			for node in frontier[leaf].tolist():
-				s = int(t.prim_start[node])
-				result.append(t.prim_indices[s : s + int(t.prim_count[node])])
+			leaves = frontier[leaf]
+			if leaves.numel():
+				# slots of all leaves at once: output position p of leaf i (p in [c_i, c_i + n_i), c_i = exclusive
+				# cumulative count) holds slot start_i + (p - c_i)
+				counts = t.prim_count[leaves].long()
+				shift = torch.repeat_interleave(
+					t.prim_start[leaves].long() - (torch.cumsum(counts, 0) - counts), counts
+				)
+				result.append(t.prim_indices[shift + torch.arange(shift.numel(), device=self.device)])
 			inner = frontier[~leaf]
 			frontier = torch.cat([t.left[inner], t.right[inner]])
 		return torch.cat(result) if result else torch.zeros(0, dtype=torch.long, device=self.device)

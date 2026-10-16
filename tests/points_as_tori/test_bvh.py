@@ -164,3 +164,35 @@ def test_wrapper(cpu64):
 	assert d > 0 and 0 <= int(t) < len(F)
 	with pytest.raises(ValueError):
 		w.closest_point_on_mesh(pat.as_wide(np.zeros(3), 3)[:, 0])
+
+
+def test_primitives_in_box(cpu64):
+	"""find_primitives_in_box: the slots of every leaf whose box and ancestors' boxes meet the query box, in the
+	breadth-first order of the implementation (reference: one node at a time); every point inside the box is among
+	them."""
+	P = pat.as_wide(cloud(3000, seed=4), 3)
+	bvh = BVH(P)
+	t = bvh.tree
+	rng = np.random.default_rng(5)
+	for _ in range(20):
+		c = rng.normal(size=3)
+		h = rng.uniform(0.05, 1.0, size=3)
+		lo, hi = torch.tensor(c - h), torch.tensor(c + h)
+		got = bvh.find_primitives_in_box(lo, hi)
+		frontier, ref = [0], []
+		while frontier:  # next level: the left children of the inner nodes, then their right children
+			lefts, rights = [], []
+			for node in frontier:
+				if not bool(((t.bounds_min[:, node] <= hi) & (t.bounds_max[:, node] >= lo)).all()):
+					continue
+				if int(t.prim_count[node]) > 0:
+					s = int(t.prim_start[node])
+					ref.append(t.prim_indices[s : s + int(t.prim_count[node])])
+				else:
+					lefts.append(int(t.left[node]))
+					rights.append(int(t.right[node]))
+			frontier = lefts + rights
+		ref = torch.cat(ref) if ref else torch.zeros(0, dtype=torch.long)
+		assert torch.equal(got, ref)
+		inside = ((P >= lo[:, None]) & (P <= hi[:, None])).all(dim=0)
+		assert set(torch.nonzero(inside).reshape(-1).tolist()) <= set(got.tolist())

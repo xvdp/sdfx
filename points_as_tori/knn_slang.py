@@ -33,13 +33,16 @@ distinct pair and caches it.
 Devices (config.SLANG_DEVICE_TYPE, config.SLANG_ADAPTER):
   * CUDA tensors: spy.create_torch_device(type, torch_device=<the tensors' device>) — type 'cuda' (default) shares
     torch's CUDA context of that GPU, 'vulkan' creates a Vulkan device on the same GPU (sgl matches the adapter by
-    the CUDA device UUID) with CUDA interop. Torch tensors are passed to the kernel and returned without copies;
-    slangpy launches on torch's current stream. Without the slangpy-torch extension slangpy reads tensor metadata
-    through Python (~µs per call; this module enables that fallback when the extension is missing).
+    the CUDA device UUID) with CUDA interop. 'cuda': the kernel reads and writes the torch tensors in place (copies
+    on the device: the queries to (m, 3) rows, int32 -> int64 indices), on torch's current stream; 'vulkan': the BVH
+    is uploaded once, and slangpy copies the per-call torch arguments through CUDA-interop buffers. Without the
+    slangpy-torch extension slangpy reads tensor metadata through Python (~µs per call; this module enables that
+    fallback when the extension is missing).
   * CPU tensors: a device of type 'vulkan' (default) on the adapter whose name contains config.SLANG_ADAPTER
-    (default: slangpy's choice, the first discrete GPU), e.g. Mesa's lavapipe on a machine without a GPU. Arrays
-    are copied through NumPy. Meant for tests and for machines without CUDA. slangpy's 'cpu' device type does not
-    run these calls (slangpy 0.43.1: "Device reports zero compute dispatch groups").
+    (default: slangpy's choice, the first discrete GPU), e.g. Mesa's lavapipe on a machine without a GPU. Host
+    memory is not device memory: the BVH is uploaded once, and per call the queries are uploaded and the two
+    outputs downloaded, once each. Meant for tests and for machines without CUDA. slangpy's 'cpu' device type does
+    not run these calls (slangpy 0.43.1: "Device reports zero compute dispatch groups").
 """
 
 from __future__ import annotations
@@ -194,8 +197,12 @@ class SlangKNN:
 		self.n_points = points.shape[1]
 		self.torch_device = points.device
 		self.device, self.module = get_device(points.device)
-		self.on_host = points.device.type != 'cuda'
+		self.on_host = points.device.type != 'cuda'  # CPU (or other non-CUDA) tensors: host <-> device copies
+		# Vulkan device on a CUDA tensor's GPU: slangpy copies torch arguments through CUDA-interop buffers on every
+		# call, so the BVH arrays are kept on the device as slangpy tensors instead (uploaded once)
+		self.interop = not self.on_host and _device_type_name(points.device) != 'cuda'
 		self.stack_size = -(-(self.bvh.stack_size) // 8) * 8
+		self._kernels: dict = {}  # k_max -> kernel with link-time constants
 
 		t = self.bvh.tree
 		M = t.n_nodes
@@ -213,38 +220,58 @@ class SlangKNN:
 		self.arrays = {name: self._upload(a) for name, a in arrays.items()}
 
 	def _upload(self, a: torch.Tensor):
-		if not self.on_host:
-			return a.contiguous()
+		"""Kernel argument for a contiguous BVH array: the torch tensor itself (slangpy CUDA device), else a slangpy
+		tensor on the device, uploaded once (through the host: a one-time copy at construction)."""
+		if not (self.on_host or self.interop):
+			return a
 		spy = _spy()
-		return spy.Tensor.from_numpy(self.device, np.ascontiguousarray(a.cpu().numpy()))
+		return spy.Tensor.from_numpy(self.device, a.cpu().numpy())
 
-	def _run(self, q: torch.Tensor, k: int, k_max: int) -> Tuple[torch.Tensor, torch.Tensor]:
-		"""(3, m) queries in self.real -> (m, k) int32 indices, (m, k) distances in self.real, on the torch device."""
+	def _kernel(self, k_max: int):
+		"""The kernel of this precision and variant with its link-time sizes; one function object per k_max."""
+		fn = self._kernels.get(k_max)
+		if fn is None:
+			name = 'knn_f64' if self.real == torch.float64 else self.VARIANTS[self.variant]
+			fn = getattr(self.module, name).constants({'BVH_K_MAX': k_max, 'BVH_STACK_SIZE': self.stack_size})
+			self._kernels[k_max] = fn
+		return fn
+
+	def _run(self, q: torch.Tensor, k: int, k_max: int, out_idx: torch.Tensor, out_dist: torch.Tensor) -> bool:
+		"""
+		k nearest of the queries q (3, m) into out_idx (m, k) int64 and, if out_dist (m, k) has the kernel's dtype,
+		out_dist; both are contiguous torch tensors on self.torch_device, written in place. Returns whether out_dist
+		was written. The kernel writes every entry (k <= number of points), so outputs are allocated uninitialized.
+
+		Data movement per call:
+		  CUDA tensors: the kernel reads q and writes out_dist in place; copies on the device: q as (m, 3) rows in the
+		    kernel's dtype (the kernel's vectorized float3 argument), and the int32 indices into out_idx (int64);
+		    with a Vulkan device (interop) slangpy also copies these torch arguments to and from shared buffers;
+		  other devices (CPU, MPS, ...): one upload of q as (m, 3) rows, one download per output, each copied once into
+		    its destination (host memory is not device memory: no copy-free path through Vulkan).
+		"""
 		spy = _spy()
 		m = q.shape[1]
-		name = 'knn_f64' if self.real == torch.float64 else self.VARIANTS[self.variant]
-		kernel = getattr(self.module, name)
-		np_real = np.float64 if self.real == torch.float64 else np.float32
-		fn = kernel.constants({'BVH_K_MAX': k_max, 'BVH_STACK_SIZE': self.stack_size})
+		fn = self._kernel(k_max)
 		a = self.arrays
-		if self.on_host:
-			out_i = spy.Tensor.from_numpy(self.device, np.full((m, k), -1, dtype=np.int32))
-			out_d = spy.Tensor.from_numpy(self.device, np.zeros((m, k), dtype=np_real))
-			qs = spy.Tensor.from_numpy(self.device, np.ascontiguousarray(q.T.cpu().numpy()))
-		else:
-			out_i = torch.full((m, k), -1, dtype=torch.int32, device=self.torch_device)
-			out_d = torch.zeros((m, k), dtype=self.real, device=self.torch_device)
-			qs = q.T.contiguous()
-		args = (spy.call_id(), qs, a['bvh_bounds'], a['bvh_nodes'], a['bvh_prims'], a['points'], k, out_i, out_d)
-		if self.on_host:
-			fn(*args)
-		else:
+		write_dist = out_dist.dtype == self.real
+		if not self.on_host:
+			qs = torch.empty((m, 3), dtype=self.real, device=self.torch_device)
+			qs.copy_(q.T)
+			i32 = torch.empty((m, k), dtype=torch.int32, device=self.torch_device)
+			d = out_dist if write_dist else torch.empty((m, k), dtype=self.real, device=self.torch_device)
 			with torch.cuda.device(self.torch_device):  # this GPU's context current during the call
-				fn(*args)
-		if self.on_host:
-			out_i = torch.from_numpy(out_i.to_numpy()).to(self.torch_device)
-			out_d = torch.from_numpy(out_d.to_numpy()).to(self.torch_device)
-		return out_i, out_d
+				fn(spy.call_id(), qs, a['bvh_bounds'], a['bvh_nodes'], a['bvh_prims'], a['points'], k, i32, d)
+			out_idx.copy_(i32)
+			return write_dist
+		np_real = np.float64 if self.real == torch.float64 else np.float32
+		qs = spy.Tensor.from_numpy(self.device, np.ascontiguousarray(q.T.cpu().numpy(), dtype=np_real))
+		i32 = spy.Tensor.empty(self.device, (m, k), dtype='int')
+		d = spy.Tensor.empty(self.device, (m, k), dtype='double' if self.real == torch.float64 else 'float')
+		fn(spy.call_id(), qs, a['bvh_bounds'], a['bvh_nodes'], a['bvh_prims'], a['points'], k, i32, d)
+		out_idx.copy_(torch.from_numpy(i32.to_numpy()))
+		if write_dist:
+			out_dist.copy_(torch.from_numpy(d.to_numpy()))
+		return write_dist
 
 	def find_k_nearest(self, queries: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
 		"""
@@ -265,11 +292,7 @@ class SlangKNN:
 			for s in range(0, n, chunk):
 				e = min(n, s + chunk)
 				q = q_all[:, s:e]
-				i32, d = self._run(q.to(self.real), k, k_max)
-				idx[s:e] = i32.long()
-				if q.dtype == self.real:
-					dist[s:e] = d
-				else:
+				if not self._run(q, k, k_max, idx[s:e], dist[s:e]):
 					diff = q[:, :, None] - self.points[:, idx[s:e]]
 					dist[s:e] = torch.sqrt((diff * diff).sum(dim=0))
 		if single:
