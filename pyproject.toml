@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=62.3"]  # "**" in package-data
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -36,7 +36,10 @@ include = ["points_as_tori*", "sdfview*", "superfit_sdf*"]
 
 [tool.setuptools.package-data]
 points_as_tori = ["models/*.pt", "slang/*.slang", "PORT_NOTES.md"]
-sdfview = ["shaders/glsl/*", "web/*.js", "NOTES.md"]
+sdfview = [
+	"shaders/glsl/*", "shaders/wgsl/*", "shaders/slang/*",
+	"web/**/*.js", "web/**/*.mjs", "web/**/*.html", "web/**/*.css", "NOTES.md", "PARALLEL.md",
+]
 superfit_sdf = ["NOTES.md"]
 
 [tool.pytest.ini_options]

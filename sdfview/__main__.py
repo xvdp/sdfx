@@ -146,6 +146,12 @@ def cmd_merge(a):
 	print(f'wrote {a.output}: {scene}')
 
 
+def cmd_serve(a):
+	from .server import serve
+
+	serve(a.scenes, port=a.port)
+
+
 def cmd_info(a):
 	from .scene import Scene
 
@@ -220,6 +226,11 @@ def main(argv=None):
 	p.add_argument('-o', '--output', required=True)
 	p.add_argument('--names', nargs='+', help='model names (default: file names), e.g. pat sup gt')
 	p.set_defaults(func=cmd_merge)
+
+	p = sub.add_parser('serve', help='serve the browser hosts (WebGL2, WebGPU, three.js) and scenes on localhost')
+	p.add_argument('scenes', nargs='*', help='.sdfx files, served at /scenes/<file name>')
+	p.add_argument('--port', type=int, default=8000)
+	p.set_defaults(func=cmd_serve)
 
 	p = sub.add_parser('info', help='print the manifest summary')
 	p.add_argument('scene')

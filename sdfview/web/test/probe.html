@@ -1,0 +1,59 @@
+<!doctype html>
+<!-- Parity probes for the browser hosts (tests/sdfview/test_hosts.py through run_probe.mjs):
+     probe.html?host=webgl2|webgpu|three-webgl|three-webgpu|three-tsl-webgl exposes window.sdfxProbe / window.sdfxRender. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>sdfview probes</title>
+  <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.webgpu.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.tsl.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/" } }
+  </script>
+</head>
+<body>
+  <canvas id="c" width="160" height="120"></canvas>
+  <script type="module">
+    import { loadScene } from '../scene.js';
+    import { OrbitCamera } from '../core/camera.js';
+    import { boxOf, defaultSettings } from '../core/view.js';
+    const modules = { webgl2: '../webgl2/renderer.js', webgpu: '../webgpu/renderer.js',
+                      'three-webgl': '../three/webgl_renderer.js', 'three-webgpu': '../three/webgpu_renderer.js',
+                      'three-tsl-webgl': '../three/webgpu_renderer.js' };  // TSL on WebGPURenderer's WebGL2 backend
+    const options = { 'three-tsl-webgl': { forceWebGL: true } };
+    const host = new URLSearchParams(location.search).get('host');
+    let createRenderer;
+    try {
+      ({ createRenderer } = await import(modules[host]));
+    } catch (e) {
+      window.sdfxError = `${host}: ${e}`;
+      throw e;
+    }
+    const canvas = document.getElementById('c');
+    const cache = new Map();
+    async function renderer(sceneUrl) {
+      if (!cache.has(sceneUrl)) {
+        for (const r of cache.values()) r.release();
+        cache.clear();
+        // a fresh canvas per scene (a canvas keeps the context type it was first given)
+        cache.set(sceneUrl, await createRenderer(canvas, await loadScene(sceneUrl), options[host]));
+      }
+      return cache.get(sceneUrl);
+    }
+    window.sdfxProbe = async (sceneUrl, field, queries, overrides = {}) => {
+      const r = await renderer(sceneUrl);
+      return Array.from(await r.probe(new Float32Array(queries), field, defaultSettings(overrides)));
+    };
+    // render one frame offscreen (no canvas presentation): RGBA8, rows bottom-up, as Renderer.render's contract
+    window.sdfxRender = async (sceneUrl, overrides = {}) => {
+      const r = await renderer(sceneUrl);
+      const scene = await loadScene(sceneUrl);
+      const cam = OrbitCamera.fit(...boxOf(scene));
+      return Array.from(await r.render(cam, defaultSettings(overrides), [canvas.width, canvas.height]));
+    };
+    window.sdfxReady = true;
+  </script>
+</body>
+</html>

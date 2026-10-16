@@ -1,0 +1,77 @@
+<!doctype html>
+<!-- sdfview — an SDF surface as one object of a three.js scene (WebGLRenderer): sdfMesh() traces the field and writes
+     depth, so it is occluded by and occludes the scene's other meshes; three.js' own camera and OrbitControls drive it.
+     python -m sdfview serve scene.sdfx, then open .../web/three/compose.html?scene=/scenes/scene.sdfx -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sdfview three.js scene</title>
+  <link rel="stylesheet" href="../core/page.css">
+  <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/" } }
+  </script>
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div class="bar"><span id="status"></span></div>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { loadScene } from '../scene.js';
+    import { boxOf, defaultSettings, diagonal, resolveField } from '../core/view.js';
+    import { sdfMesh, uploadTextures } from './webgl_renderer.js';
+
+    const canvas = document.getElementById('view');
+    const status = document.getElementById('status');
+    const url = new URLSearchParams(location.search).get('scene');
+    if (!url) throw new Error((status.textContent = 'add ?scene=/scenes/<name>.sdfx'));
+
+    const sdf = await loadScene(url);
+    const [lo, hi] = boxOf(sdf);
+    const center = new THREE.Vector3(...lo).add(new THREE.Vector3(...hi)).multiplyScalar(0.5);
+    const size = diagonal([lo, hi]);
+
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    const world = new THREE.Scene();
+    world.background = new THREE.Color(0xffffff);
+
+    // the SDF: one mesh per surface (the field the viewer would pick first)
+    const settings = defaultSettings();
+    const field = resolveField(sdf, 'auto', true, ['pat', 'grid', 'glsl']);
+    world.add(await sdfMesh(sdf, field, uploadTextures(sdf), settings));
+
+    // ordinary three.js objects around it: a ground grid, axes, a lit torus knot crossing the surface
+    const grid = new THREE.GridHelper(2 * size, 20, 0x888888, 0xcccccc);
+    grid.position.set(center.x, lo[1], center.z);
+    world.add(grid, new THREE.AxesHelper(0.5 * size));
+    const knot = new THREE.Mesh(new THREE.TorusKnotGeometry(0.25 * size, 0.04 * size, 160, 16),
+                                new THREE.MeshStandardMaterial({ color: 0x4477aa, roughness: 0.4 }));
+    knot.position.copy(center);
+    world.add(knot, new THREE.HemisphereLight(0xffffff, 0x444444, 2.0));
+
+    const camera = new THREE.PerspectiveCamera(40, 1, 0.01 * size, 100 * size);
+    camera.position.copy(center).add(new THREE.Vector3(0.9, 0.6, 1.2).multiplyScalar(size));
+    const controls = new OrbitControls(camera, canvas);
+    controls.target.copy(center);
+    controls.update();
+
+    function frame() {
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / Math.max(h, 1);
+      camera.updateProjectionMatrix();
+      const t0 = performance.now();
+      renderer.render(world, camera);
+      status.textContent = `three.js scene · ${field.name} (${field.type}) · ${(performance.now() - t0).toFixed(1)} ms (submit)`;
+    }
+    controls.addEventListener('change', frame);
+    window.addEventListener('resize', frame);
+    frame();
+    window.sdfxReady = true;
+  </script>
+</body>
+</html>

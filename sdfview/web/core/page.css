@@ -1,0 +1,6 @@
+/* page.css — layout shared by the host pages: a full-window canvas and a status bar */
+:root { color-scheme: light dark; }
+html, body { margin: 0; height: 100%; background: #fff; font: 13px system-ui, sans-serif; }
+@media (prefers-color-scheme: dark) { html, body { background: #111; color: #ddd; } }
+canvas { display: block; width: 100vw; height: calc(100vh - 28px); touch-action: none; }
+.bar { height: 28px; display: flex; align-items: center; gap: 12px; padding: 0 12px; }

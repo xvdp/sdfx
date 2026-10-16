@@ -1,0 +1,32 @@
+<!doctype html>
+<!-- sdfview — three.js host, WebGPURenderer (the field in TSL; grid fields: the PAT and SuperFit scenes are drawn
+     from their grid bakes, python -m sdfview pat|superfit --bake N). ?backend=webgl: the same TSL on three.js'
+     WebGL2 backend. python -m sdfview serve scene.sdfx, then open .../web/three/webgpu.html?scene=/scenes/scene.sdfx -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sdfview three.js WebGPU</title>
+  <link rel="stylesheet" href="../core/page.css">
+  <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.webgpu.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.tsl.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/" } }
+  </script>
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div class="bar"><input type="file" accept=".sdfx"> <span id="status"></span></div>
+  <script type="module">
+    import { runViewer } from '../core/app.js';
+    import { createRenderer } from './webgpu_renderer.js';
+    const forceWebGL = new URLSearchParams(location.search).get('backend') === 'webgl';
+    runViewer((canvas, scene) => createRenderer(canvas, scene, { forceWebGL }),
+              { canvas: document.getElementById('view'), status: document.getElementById('status'),
+                title: forceWebGL ? 'three.js TSL (WebGL2 backend)' : 'three.js WebGPU (TSL)' })
+      .catch((e) => { document.getElementById('status').textContent = e; throw e; });
+  </script>
+</body>
+</html>

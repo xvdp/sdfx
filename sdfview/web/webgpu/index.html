@@ -1,0 +1,20 @@
+<!doctype html>
+<!-- sdfview — raw WebGPU host. python -m sdfview serve scene.sdfx, then open .../web/webgpu/?scene=/scenes/scene.sdfx -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sdfview WebGPU</title>
+  <link rel="stylesheet" href="../core/page.css">
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div class="bar"><input type="file" accept=".sdfx"> <span id="status"></span></div>
+  <script type="module">
+    import { runViewer } from '../core/app.js';
+    import { createRenderer } from './renderer.js';
+    runViewer(createRenderer, { canvas: document.getElementById('view'), status: document.getElementById('status'),
+                                title: 'WebGPU' }).catch((e) => { document.getElementById('status').textContent = e; throw e; });
+  </script>
+</body>
+</html>

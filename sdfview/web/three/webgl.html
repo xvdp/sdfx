@@ -1,0 +1,29 @@
+<!doctype html>
+<!-- sdfview — three.js host, WebGLRenderer (the GLSL modules in RawShaderMaterials).
+     python -m sdfview serve scene.sdfx, then open .../web/three/webgl.html?scene=/scenes/scene.sdfx
+     three.js comes from the jsDelivr CDN (import map below); for offline use point the map to a local copy. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sdfview three.js WebGL</title>
+  <link rel="stylesheet" href="../core/page.css">
+  <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.webgpu.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.tsl.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/" } }
+  </script>
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div class="bar"><input type="file" accept=".sdfx"> <span id="status"></span></div>
+  <script type="module">
+    import { runViewer } from '../core/app.js';
+    import { createRenderer } from './webgl_renderer.js';
+    runViewer(createRenderer, { canvas: document.getElementById('view'), status: document.getElementById('status'),
+                                title: 'three.js WebGL' }).catch((e) => { document.getElementById('status').textContent = e; throw e; });
+  </script>
+</body>
+</html>
