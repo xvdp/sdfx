@@ -47,6 +47,10 @@ Hosts:
 | three.js WebGLRenderer | `web/three/webgl_renderer.js` | GLSL, target `three`, in `RawShaderMaterial`s | pat, grid, glsl | surfaces, cut plane, points |
 | three.js WebGPURenderer | `web/three/webgpu_renderer.js` | TSL (compiled by three.js to WGSL, or GLSL with `forceWebGL`) | grid | surfaces, cut plane, points |
 
+The tori inspector (a click: the blend at the clicked point, a torus, its principal curvatures; NOTES.md) is in the
+moderngl window only for now; what it draws comes from `sdfview/inspector.py` (positions, sizes, colors, the box of
+the torus), host independent, with `field_torus.glsl`, `marks.*`, `lines.*` on the GLSL side.
+
 Viewers: the same keys and mouse in the moderngl window and the browser pages (`HELP_LINES` in
 `backends/moderngl/window.py`, `HELP` in `web/core/app.js`); H shows / hides them on screen. The cut plane is
 optional everywhere: key C, `ViewSettings.show_cutplane` / `showCutplane`, CLI `--no-cut`.

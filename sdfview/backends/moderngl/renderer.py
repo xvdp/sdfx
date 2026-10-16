@@ -92,6 +92,7 @@ class Renderer:
 					self.textures[name] = array_texture(ctx, scene.arrays[name], self.texture_width)
 		self.box_min, self.box_max = view.scene_box(scene)
 		self.diagonal = float(np.linalg.norm(self.box_max - self.box_min))
+		self._inspection = None  # tori inspector state (set_inspection)
 
 	# ---- programs
 
@@ -103,6 +104,8 @@ class Renderer:
 			return {'FIELD_GRID': None}
 		if field['type'] == 'glsl':
 			return {'FIELD_GLSL': None}
+		if field['type'] == 'torus':  # one torus (tori inspector): field_torus.glsl
+			return {'FIELD_TORUS': None}
 		raise ValueError(f'unsupported field type {field["type"]!r}')
 
 	@staticmethod
@@ -142,6 +145,10 @@ class Renderer:
 			_set(prog, 'grid_min', field['bounds']['min'])
 			_set(prog, 'grid_max', field['bounds']['max'])
 			unit += 1
+		elif field['type'] == 'torus':  # its own zero set (the isovalue setting shifts the scene's fields)
+			_set(prog, 'field_isovalue', 0.0)
+			for key in ('center', 'axis', 'R', 'r'):
+				_set(prog, f'torus_{key}', field['torus'][key])
 		elif field['type'] == 'glsl':
 			_set(prog, 'field_part', self.field_part(field, settings))
 			lo, hi = np.asarray(field['bounds']['min'], float), np.asarray(field['bounds']['max'], float)
@@ -179,8 +186,11 @@ class Renderer:
 			'u_camera_dir': camera.direction(),
 		}
 
-	def draw(self, camera: OrbitCamera, settings: Optional[ViewSettings] = None, viewport=None) -> None:
-		"""Draw into the currently bound framebuffer (clears color and depth inside `viewport`)."""
+	def draw(
+		self, camera: OrbitCamera, settings: Optional[ViewSettings] = None, viewport=None, inspection: bool = True
+	) -> None:
+		"""Draw into the currently bound framebuffer (clears color and depth inside `viewport`); the tori inspector's
+		marks last (set_inspection), unless inspection=False."""
 		s = settings or ViewSettings()
 		ctx = self.ctx
 		fbo = ctx.fbo
@@ -245,16 +255,22 @@ class Renderer:
 			fbo.depth_mask = True
 			ctx.disable(moderngl.BLEND)
 
+		if inspection and self._inspection is not None:
+			self._draw_inspection(s, cam, (*n, c), eps)
+
 	def surface_passes(self, s: ViewSettings) -> list:
 		return view.surface_passes(self.scene, s)
 
-	def _draw_surface(self, field, s: ViewSettings, cam: dict, clip_plane, eps, color_front, color_back, opacity):
+	def _draw_surface(
+		self, field, s: ViewSettings, cam: dict, clip_plane, eps, color_front, color_back, opacity, box=None
+	):
 		prog, vao = self.program('fullscreen.vert', 'surface.frag', field)
 		self._bind_field(prog, field, s)
 		for k, val in cam.items():
 			_set(prog, k, val)
-		_set(prog, 'u_box_min', self.box_min)
-		_set(prog, 'u_box_max', self.box_max)
+		lo, hi = box if box is not None else (self.box_min, self.box_max)
+		_set(prog, 'u_box_min', lo)
+		_set(prog, 'u_box_max', hi)
 		_set(prog, 'u_max_steps', int(s.max_steps))
 		_set(prog, 'u_epsilon', float(eps))
 		_set(prog, 'u_step_scale', float(s.step_scale))
@@ -277,6 +293,111 @@ class Renderer:
 		finally:
 			fbo.release()
 		return np.frombuffer(data, np.uint8).reshape(h, w, 4)[::-1].copy()
+
+	# ---- picking and the tori inspector (sdfview/inspector.py)
+
+	def pick_depth(self, fbo: moderngl.Framebuffer, camera: OrbitCamera, viewport, pixel) -> Optional[np.ndarray]:
+		"""World point seen at `pixel` (x, y from the bottom left, in `fbo` pixels) of a frame drawn into `fbo` with
+		`viewport`: the depth buffer value d -> NDC (2 (pixel + ½) / size - 1, 2 d - 1) -> (P V)⁻¹. None on the
+		background (d = 1). Surfaces write their traced depth (gl_FragDepth), so the point is on the surface up to the
+		24-bit depth quantization; the cut plane and points are picked as drawn."""
+		x, y = int(pixel[0]), int(pixel[1])
+		vx, vy, vw, vh = viewport
+		if not (vx <= x < vx + vw and vy <= y < vy + vh):
+			return None
+		d = float(np.frombuffer(fbo.read(viewport=(x, y, 1, 1), attachment=-1, dtype='f4'), np.float32)[0])
+		if d >= 1.0:
+			return None
+		cam = self._camera_uniforms(camera, viewport)
+		ndc = np.array([2 * (x + 0.5 - vx) / vw - 1, 2 * (y + 0.5 - vy) / vh - 1, 2 * d - 1, 1.0])
+		p = cam['u_inv_view_proj'] @ ndc
+		return p[:3] / p[3]
+
+	def pick(self, camera: OrbitCamera, settings: Optional[ViewSettings], size, pixel) -> Optional[np.ndarray]:
+		"""Draw a frame of `size` offscreen (without the inspector's marks) and pick_depth at `pixel` (bottom left)."""
+		w, h = int(size[0]), int(size[1])
+		fbo = self.ctx.framebuffer(self.ctx.renderbuffer((w, h), 4), self.ctx.depth_renderbuffer((w, h)))
+		try:
+			fbo.use()
+			self.draw(camera, settings, (0, 0, w, h), inspection=False)
+			return self.pick_depth(fbo, camera, (0, 0, w, h), pixel)
+		finally:
+			fbo.release()
+
+	def set_inspection(self, ins, show_torus: bool = True, show_network: bool = True) -> None:
+		"""Show an Inspection (sdfview.inspector.inspect) in the following frames: its torus (translucent), the blended
+		points by weight, the network neighborhood, the principal circles and directions; None clears it."""
+		from ... import inspector
+
+		self._release_inspection()
+		if ins is None:
+			return
+		pc = next(iter(self.scene.pointclouds), {})
+		radius = float(pc.get('radius', 0.005 * self.diagonal))
+		pos, rad, col = inspector.marks(self.scene, ins, radius, network=show_network)
+		seg, seg_col = inspector.lines(ins, max(ins.radius, 2 * radius))
+		ctx = self.ctx
+		mprog, _ = self.program('marks.vert', 'marks.frag')
+		lprog, _ = self.program('lines.vert', 'lines.frag')
+		buffers = [ctx.buffer(pos.tobytes()), ctx.buffer(rad.tobytes()), ctx.buffer(col.tobytes())]
+		buffers += [ctx.buffer(seg.tobytes()), ctx.buffer(seg_col.tobytes())]
+		marks_vao = ctx.vertex_array(
+			mprog,
+			[(buffers[0], '3f', 'in_position'), (buffers[1], '1f', 'in_radius'), (buffers[2], '4f', 'in_color')],
+		)
+		lines_vao = ctx.vertex_array(lprog, [(buffers[3], '3f', 'in_position'), (buffers[4], '4f', 'in_color')])
+		t = ins.torus
+		torus = {
+			'name': '__inspector_torus',
+			'type': 'torus',
+			'params': {},
+			'torus': {'center': t.center, 'axis': t.axis, 'R': t.R, 'r': t.s * t.r},
+		}
+		self._inspection = {
+			'ins': ins,
+			'torus': torus if show_torus else None,
+			'box': inspector.torus_box(ins, 0.5 * self.diagonal),
+			'marks': (mprog, marks_vao, len(pos)),
+			'lines': (lprog, lines_vao, len(seg)),
+			'buffers': buffers,
+		}
+
+	def _release_inspection(self) -> None:
+		if self._inspection is not None:
+			self._inspection['marks'][1].release()
+			self._inspection['lines'][1].release()
+			for b in self._inspection['buffers']:
+				b.release()
+		self._inspection = None
+
+	def _draw_inspection(self, s: ViewSettings, cam: dict, clip_plane, eps) -> None:
+		from ... import inspector
+
+		ctx, fbo, st = self.ctx, self.ctx.fbo, self._inspection
+		ctx.enable(moderngl.BLEND)
+		ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+		if st['torus'] is not None:  # translucent, as an overlay model: blended, no depth write
+			fbo.depth_mask = False
+			self._draw_surface(
+				st['torus'], s, cam, clip_plane, eps, inspector.TORUS_FRONT, inspector.TORUS_BACK,
+				inspector.TORUS_OPACITY, box=st['box'],
+			)  # fmt: skip
+			fbo.depth_mask = True
+		# marks and lines twice: faint without depth test (behind surfaces), then opaque with it
+		for depth_test, alpha in ((False, 0.3), (True, 1.0)):
+			if depth_test:
+				ctx.enable(moderngl.DEPTH_TEST)
+				ctx.depth_func = '<='
+			else:
+				ctx.disable(moderngl.DEPTH_TEST)
+			for key, mode in (('lines', moderngl.LINES), ('marks', moderngl.POINTS)):
+				prog, vao, count = st[key]
+				for k, val in cam.items():
+					_set(prog, k, val)
+				_set(prog, 'u_alpha', alpha)
+				vao.render(mode, vertices=count)
+		ctx.depth_func = '<'
+		ctx.disable(moderngl.BLEND)
 
 	# ---- probes (GPU evaluation at given points)
 
@@ -343,6 +464,7 @@ class Renderer:
 		return result[:, :k]
 
 	def release(self) -> None:
+		self._release_inspection()
 		for t in self.textures.values():
 			t.release()
 		for v in self._vao.values():

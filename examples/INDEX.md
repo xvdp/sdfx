@@ -24,6 +24,7 @@ examples were written on (4 threads, no GPU); GPU paths were not run there.
 | `hosts/shadertoy_moderngl.py` | view | Shadertoy file or any `.sdfx` field (`pat`, `grid`, `glsl`) in a single-file moderngl host |
 | `hosts/sdfview_window.py` | view | `.sdfx` → sdfview's window (keys: H) |
 | `hosts/sdfview_headless.py` | view | `.sdfx` → PNG images and GPU probes, without a display (EGL) |
+| `hosts/tori_inspector.py` | inspect | `.sdfx` (PAT) → the blend at a picked point: neighbors by weight, a torus, its principal curvatures and circles, the network's neighborhood (PNG + printed values) |
 | `hosts/sdfview_embedded.py` | view | sdfview's Renderer inside your own moderngl app (two viewports) |
 | `hosts/slang_knn.py` | k-NN | the fused Slang kernel from torch (CUDA, Vulkan, CPU tensors) vs the torch BVH |
 | `hosts/slangpy_render.py` | view | `.sdfx` → PNG through the Slang modules (slangpy compute kernels), compared with moderngl |

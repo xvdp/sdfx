@@ -52,6 +52,7 @@ class PointsAsTori:
 		points = config.as_wide(points, 3)  # (3, |P|) on the configured device
 		normals = config.as_wide(normals, 3)
 		self._tdf = TorusDistanceField(points, normals)
+		self.network_k = None  # added in the port: the network's neighborhood size, when the tori come from it
 
 		if tori_filepath is not None:
 			tori = self._load_tori(tori_filepath)
@@ -64,6 +65,7 @@ class PointsAsTori:
 				raise FileNotFoundError(f'Model file not found: {model_path}')
 
 			model, k_nb = PointsAsTori._load_model(model_path)
+			self.network_k = int(k_nb)
 
 			coeffs = model.precompute_coefficients_in_chunks(points, normals, k_nb, chunk_size=50000)
 			centers, axes, major_radii, minor_radii = fit_tori_from_forms(points, normals, coeffs)

@@ -80,6 +80,8 @@ def scene_from_pat(
 				'isovalue': 0.0,
 				'bvh_depth': int(bvh.depth.max()),
 				'bvh_leaf_size': int(leaf_size),
+				# neighborhood the network predicted each torus from (tori inspector); absent for tori read from a file
+				**({'network_k': int(sdf.network_k)} if getattr(sdf, 'network_k', None) else {}),
 			},
 			'arrays': {key: f'{name}/{key}' for key in ('points', 'tori', 'bvh_bounds', 'bvh_nodes', 'bvh_prims')},
 		}

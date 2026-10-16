@@ -11,6 +11,7 @@ from typing import Optional
 import moderngl
 import moderngl_window as mglw
 
+from ... import inspector
 from ...camera import OrbitCamera
 from ...scene import Scene
 from ...settings import ViewSettings
@@ -26,6 +27,8 @@ HELP_LINES = [
 	('V  T', 'overlay all models (G picks the opaque one) · overlay transparency'),
 	('[ ]  U', 'parts of an assembly (whole, all parts, part 0, 1, ...) · color by part'),
 	('I O  N M', 'isovalue -/+ (shift: ×5) · PAT neighbors k -/+ (shift: ×8)'),
+	('click  , .', 'tori inspector at the clicked point · previous / next neighbor (by weight)'),
+	('J  L  E', 'inspector: network neighborhood · torus · off'),
 	('1-4', 'resolution while dragging (1 = full)'),
 	('R  H  Esc', 'reset view · this help (on screen and here) · quit'),
 ]
@@ -46,21 +49,23 @@ void main() { frag_color = vec4(0.08, 0.08, 0.08, 0.82); }
 """
 
 
-class HelpOverlay:
-	"""HELP_LINES drawn over the window: moderngl-window's bitmap-font TextWriter2D (ASCII and Latin-1) on a panel."""
+class TextPanel:
+	"""Lines of text over the window, in a corner ('top' left or 'bottom' left): moderngl-window's bitmap-font
+	TextWriter2D (ASCII and Latin-1) on a translucent panel."""
 
-	def __init__(self, ctx: moderngl.Context):
+	def __init__(self, ctx: moderngl.Context, lines=(), corner: str = 'top'):
 		from moderngl_window.text.bitmapped import TextWriter2D
 
 		self.ctx = ctx
 		self.writer = TextWriter2D()
 		self.panel = ctx.program(vertex_shader=_PANEL_VERT, fragment_shader=_PANEL_FRAG)
 		self.vao = ctx.vertex_array(self.panel, [])
-		self.lines = [f'{k:15s} {v}' for k, v in HELP_LINES]
+		self.lines = list(lines)
+		self.corner = corner
 		self.visible = True
 
 	def draw(self, size, scale: float = 1.0) -> None:
-		if not self.visible:
+		if not self.visible or not self.lines:
 			return
 		w, h = size
 		px = 16.0 * scale  # character height in pixels
@@ -68,7 +73,8 @@ class HelpOverlay:
 		margin, step = 10.0 * scale, 1.35 * px
 		width = max(len(line) for line in self.lines) * cw + 2 * margin
 		height = len(self.lines) * step + 2 * margin
-		x0, y1 = 12.0 * scale, h - 12.0 * scale
+		x0 = 12.0 * scale
+		y1 = h - 12.0 * scale if self.corner == 'top' else 12.0 * scale + height
 		self.ctx.disable(moderngl.DEPTH_TEST)
 		self.ctx.enable(moderngl.BLEND)
 		self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
@@ -79,6 +85,10 @@ class HelpOverlay:
 			self.writer.text = line
 			self.writer.draw((x0 + margin + 0.5 * cw, y1 - margin - (i + 0.5) * step), size=px)
 		self.ctx.disable(moderngl.BLEND)
+
+
+def HelpOverlay(ctx: moderngl.Context) -> TextPanel:
+	return TextPanel(ctx, [f'{k:15s} {v}' for k, v in HELP_LINES], 'top')
 
 
 class ViewerWindow(mglw.WindowConfig):
@@ -110,9 +120,14 @@ class ViewerWindow(mglw.WindowConfig):
 		print(HELP)
 		try:
 			self._help = HelpOverlay(self.ctx)
+			self._info = TextPanel(self.ctx, corner='bottom')
 		except Exception as e:  # noqa: BLE001  (font resources missing: the terminal copy only)
-			print(f'(no on-screen help: {e})')
-			self._help = None
+			print(f'(no on-screen text: {e})')
+			self._help = self._info = None
+		# tori inspector (sdfview/inspector.py): a left click without dragging inspects the clicked point
+		self._inspection = None
+		self._show_torus = self._show_network = True
+		self._press = None  # (x, y, moved) of the pressed button
 		self._update_title()
 
 	# ---- rendering
@@ -146,7 +161,9 @@ class ViewerWindow(mglw.WindowConfig):
 		prog['u_viewport'].value = (0.0, 0.0, float(bw), float(bh))
 		vao.render(moderngl.TRIANGLES, vertices=3)
 		if self._help is not None:
-			self._help.draw((bw, bh), scale=bw / max(self.wnd.size[0], 1))
+			scale = bw / max(self.wnd.size[0], 1)
+			self._help.draw((bw, bh), scale)
+			self._info.draw((bw, bh), scale)
 
 	def on_resize(self, width: int, height: int) -> None:
 		self._dirty = True
@@ -155,12 +172,18 @@ class ViewerWindow(mglw.WindowConfig):
 
 	def on_mouse_press_event(self, x, y, button):
 		self._dragging = True
+		self._press = [x, y, False]
 
 	def on_mouse_release_event(self, x, y, button):
 		self._dragging = False
 		self._dirty = True
+		if button == 1 and self._press is not None and not self._press[2]:  # a click: no drag in between
+			self.inspect_at(x, y)
+		self._press = None
 
 	def on_mouse_drag_event(self, x, y, dx, dy):
+		if self._press is not None and abs(x - self._press[0]) + abs(y - self._press[1]) > 3:
+			self._press[2] = True
 		states = self.wnd.mouse_states
 		if states.left:
 			self.camera.orbit(dx, dy)
@@ -216,8 +239,26 @@ class ViewerWindow(mglw.WindowConfig):
 		elif key in (keys.N, keys.M):
 			k = v.k or self._scene_k()
 			v.k = max(1, k + (-1 if key == keys.N else 1) * (8 if modifiers.shift else 1))
+			if self._inspection is not None:  # the blend at the same point with the new k
+				rank = self._inspection.selected
+				self._inspection = inspector.inspect(self.scene, self._inspection.x, k=v.k, lambda_scale=v.lambda_scale)
+				inspector.select(self.scene, self._inspection, rank)
+				self._show_inspection()
 		elif key in (keys.NUMBER_1, keys.NUMBER_2, keys.NUMBER_3, keys.NUMBER_4):
 			self.drag_scale = {keys.NUMBER_1: 1, keys.NUMBER_2: 2, keys.NUMBER_3: 3, keys.NUMBER_4: 4}[key]
+		elif key in (keys.COMMA, keys.PERIOD) and self._inspection is not None:
+			step_rank = -1 if key == keys.COMMA else 1
+			inspector.select(self.scene, self._inspection, self._inspection.selected + step_rank)
+			self._show_inspection()
+		elif key == keys.J and self._inspection is not None:
+			self._show_network = not self._show_network
+			self._show_inspection()
+		elif key == keys.L and self._inspection is not None:
+			self._show_torus = not self._show_torus
+			self._show_inspection()
+		elif key == keys.E:
+			self._inspection = None
+			self._show_inspection()
 		elif key == keys.R:
 			self.camera = OrbitCamera.fit(self.renderer.box_min, self.renderer.box_max, up=self.up)
 		elif key == keys.H:
@@ -228,6 +269,34 @@ class ViewerWindow(mglw.WindowConfig):
 			return
 		self._dirty = True
 		self._update_title()
+
+	# ---- tori inspector
+
+	def inspect_at(self, x: float, y: float) -> None:
+		"""Inspect the point seen at window position (x, y) (top left origin, window units): pick it in the depth
+		buffer of a frame drawn at the framebuffer's size, then sdfview.inspector.inspect."""
+		bw, bh = self.wnd.buffer_size
+		ww, wh = self.wnd.size
+		px, py = x * bw / max(ww, 1), bh - 1 - y * bh / max(wh, 1)
+		p = self.renderer.pick(self.camera, self.view, (bw, bh), (px, py))
+		if p is None:
+			return
+		ins = inspector.inspect(self.scene, p, k=self.view.k, lambda_scale=self.view.lambda_scale)
+		if ins is None:
+			print('tori inspector: the scene has no pat field')
+			return
+		self._inspection = ins
+		self._show_inspection()
+
+	def _show_inspection(self) -> None:
+		ins = self._inspection
+		self.renderer.set_inspection(ins, show_torus=self._show_torus, show_network=self._show_network)
+		lines = inspector.describe(ins) if ins is not None else []
+		if lines:
+			print('\n'.join(lines))
+		if self._info is not None:
+			self._info.lines = lines
+		self._dirty = True
 
 	def _scene_k(self) -> int:
 		f = next((f for f in self.scene.fields if f['type'] == 'pat'), None)

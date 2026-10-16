@@ -1,4 +1,5 @@
-// field.glsl — selects the field a program evaluates: compile with FIELD_PAT, FIELD_GRID or FIELD_GLSL defined.
+// field.glsl — selects the field a program evaluates: compile with FIELD_PAT, FIELD_GRID, FIELD_GLSL or FIELD_TORUS
+// defined (FIELD_TORUS: one torus, field_torus.glsl, for the tori inspector).
 //   float fieldDistance(vec3 p)                       φ(p) - isovalue
 //   float fieldDistanceGradient(vec3 p, out vec3 g)  φ(p) - isovalue and ∇φ(p)
 //   int fieldPart(vec3 p)                            part shown at p (FIELD_GLSL: the selected part, or the nearest
@@ -37,6 +38,11 @@ float fieldDistanceGradient(vec3 p, out vec3 g) {
     return glslDistance(p) - field_isovalue;
 }
 int fieldPart(vec3 p) { return field_part >= 0 ? field_part : assemblyNearestPart(p); }
+#elif defined(FIELD_TORUS)
+#include "field_torus.glsl"
+float fieldDistance(vec3 p) { return torusDistance(p) - field_isovalue; }
+float fieldDistanceGradient(vec3 p, out vec3 g) { return torusDistanceGradient(p, g) - field_isovalue; }
+int fieldPart(vec3 p) { return -1; }
 #else
-#error "define FIELD_PAT, FIELD_GRID or FIELD_GLSL"
+#error "define FIELD_PAT, FIELD_GRID, FIELD_GLSL or FIELD_TORUS"
 #endif

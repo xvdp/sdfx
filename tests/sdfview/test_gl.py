@@ -216,6 +216,11 @@ for key in ('P', 'X', 'UP', 'K', 'G'):
 cfg.on_mouse_press_event(10, 10, 1); cfg.on_mouse_drag_event(12, 10, 2, 0); cfg.on_mouse_release_event(12, 10, 1)
 cfg.on_mouse_scroll_event(0, 1)
 wnd.clear(); wnd.render(0.1, 0.016)
+cfg.on_mouse_press_event(80, 60, 1); cfg.on_mouse_release_event(80, 60, 1)  # a click: the tori inspector
+for key in ('PERIOD', 'J', 'L'):
+    cfg.on_key_event(getattr(wnd.keys, key), wnd.keys.ACTION_PRESS, Mods())
+print('inspected:', cfg._inspection is not None, 'rank:', getattr(cfg._inspection, 'selected', None))
+wnd.clear(); wnd.render(0.2, 0.016)
 w, h = wnd.buffer_size
 img = np.frombuffer(wnd.fbo.read(components=3), np.uint8).reshape(h, w, 3)
 print('title:', wnd.title)
@@ -245,6 +250,7 @@ def test_window(tmp_path, sphere, backend):
 	colors = int(res.stdout.split('distinct colors:')[1].split()[0])
 	print('\n' + [ln for ln in res.stdout.splitlines() if ln.startswith('title:')][0])
 	assert colors > 10
+	assert 'inspected: True rank: 1' in res.stdout, res.stdout[-2000:]
 
 
 def test_cli(tmp_path, sphere, gl_ctx):

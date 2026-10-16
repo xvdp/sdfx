@@ -10,6 +10,7 @@ sdfview/
   scene.py                 file format (.sdfx): JSON manifest + binary arrays, Python reader/writer
   camera.py, settings.py   orbit camera and view settings (NumPy / plain data, backend independent)
   view.py                  field choice per model, surface passes, model colors, scene box (all Python hosts)
+  inspector.py             tori inspector: the blend at a point, a torus' principal curvatures and circles
   png.py                   minimal PNG writer
   accel/lbvh.py            re-export of the LBVH builder in points_as_tori/bvh.py (port of the original bvh.cpp)
   sources/pat.py           PointsAsTori -> scene (points, tori, BVH, point cloud, optional grid bake)
@@ -19,7 +20,8 @@ sdfview/
                            (preprocessor: include, ifdef / if defined / elif / else, valued defines as consts)
   shaders/glsl/            modules: common, bvh, field_pat, field_grid, field, camera, colormap
                            programs: fullscreen.vert, surface.frag, cutplane.{vert,frag}, points.{vert,frag},
-                           probe.frag, probe_knn.frag, blit.frag
+                           probe.frag, probe_knn.frag, blit.frag; inspector: field_torus.glsl,
+                           marks.{vert,frag}, lines.{vert,frag}
   shaders/wgsl/            the same modules in WGSL; programs surface.wgsl, probe.wgsl (compute)
   shaders/slang/           field (interface IField), field_pat (PatField), field_grid (GridField), camera, surface,
                            probe; common and bvh are points_as_tori/slang/ (shared with the fused k-NN kernel)
@@ -134,6 +136,31 @@ Fields with parts (`glsl`): keys `[` / `]` cycle the whole assembly → all part
   pixel. The grid bake (torch, `--bake N`) gives one texture fetch per evaluation; by default the surface uses the
   bake and the cut plane uses the exact field. The window renders only on change, at reduced resolution while
   dragging.
+
+## Tori inspector (moderngl window, `examples/hosts/tori_inspector.py`)
+
+A left click without dragging inspects the point seen there (`Renderer.pick`: the depth buffer at the pixel,
+unprojected with (P V)⁻¹; surfaces write their traced depth, so the point is on the surface up to 24-bit depth
+quantization; the cut plane and points are picked as drawn). `sdfview/inspector.py` (NumPy, host independent) then
+computes, from the scene's arrays:
+
+- the blend at x: its k nearest points, weights ω_i = w_i / Σ w (field_pat.glsl), torus distances g_i(x), φ(x);
+- for one neighbor j (`,` `.` cycle by weight): the torus' principal geometry recovered from the stored (c, R, u, s r)
+  and p_j: the torus point p_t closest to p_j (≈ p* = p_j + a00 n_j), κ_min (parallel, cyan) and κ_max (meridian,
+  magenta), their directions, the two principal circles through p_t (the osculating circles of the network's
+  quadratic patch at p*), inner or outer equator (sgn κ_min κ_max); the formulas are in the module docstring;
+- the network's neighborhood of p_j: its `network_k` nearest points (scene parameter, written by sdfview.sources.pat
+  for tori fitted by the network; else 64, the bundled model's).
+
+Measured (tests/sdfview/test_inspector.py, 368 random quadratic patches with 178 saddles, float32 tori): κ relative
+error 1.0e-5, principal directions within 0.25° (1 - |cos| 9.3e-6), equator side always right; |p_t - p*| up to 2.5e-3
+for |a00| <= 0.01 and slopes <= 0.2 (p_t is the closest torus point to p_j, p* the network's foot point: they differ
+by ~|a00| · slope); the blend φ(x) equals the torch evaluator's to 1.1e-6.
+
+Drawing (`Renderer.set_inspection`): the torus as a field of type `torus` (`field_torus.glsl`, traced by
+`surface.frag` translucently in the box `inspector.torus_box`: the whole torus, or a cube around p_t when R is large);
+marks (`marks.vert/frag`: sprites from vertex attributes) and lines (`lines.vert/frag`) twice, faint without depth test
+then opaque with it, so marks behind the surface stay visible. Keys: J network neighborhood, L torus, E off.
 
 ## Not done yet
 

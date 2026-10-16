@@ -7,7 +7,8 @@ HOST — sdfview's own window (moderngl-window): open any .sdfx scene with view 
 
 Keys (H shows them on screen and prints them): S surface, C cut plane, P points, X/Y/Z cut axis, arrows move the cut, K clip, G/F cycle the
 surface / cut-plane field, V overlay all models, T translucency, [ ] assembly parts, U color by part, I/O isovalue,
-N/M neighbors k, R reset. The same as: python -m sdfview view <scene> [options].
+N/M neighbors k, R reset; a click inspects the tori at the clicked point (, . neighbor, J network neighborhood,
+L torus, E off; examples/hosts/tori_inspector.py). The same as: python -m sdfview view <scene> [options].
 """
 
 import argparse
