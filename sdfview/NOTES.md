@@ -89,6 +89,22 @@ GLSL vs torch float32 / float64 distance max |Δφ| ≈ 1e-7–1e-6 (|φ| up to 
 weights, typically 8 bits: errors up to ~1/256 of a cell's value range); sphere-traced silhouette of |x| - 1 vs
 the analytic unit sphere: IoU > 0.97 at 96×72.
 
+## Several models in one scene (toggle / overlay)
+
+`sdfview.scene.merge_scenes({'pat': a, 'sup': b, 'gt': c})` (CLI `python -m sdfview merge a.sdfx b.sdfx c.sdfx -o
+abc.sdfx --names pat sup gt`) puts several scenes in one: arrays renamed `<model>/<name>`, fields and point clouds
+tagged `"model"` (an optional key; older readers ignore it), bounds = union. The renderer then:
+
+- **single** (default): draws `surface_field` only, in its model's color (pat tan, sup blue, gt grey, others from a
+  palette; `ViewSettings.model_colors` overrides); cycling the surface field (key G) toggles between models;
+- **overlay** (key V, `--overlay`): draws one field per model (its grid if it has one, else its exact field), the
+  selected model opaque; with opacity 1 every surface writes depth and the nearest one shows per pixel (where one model
+  lies outside the other, its color appears); with `overlay_opacity` < 1 (key T, `--opacity`) the other models are
+  drawn last, blended, without writing depth, so a surface inside another stays visible.
+
+Coincident surfaces in an opaque overlay alternate pixel by pixel (depth fighting); the translucent mode shows them
+without it.
+
 ## Rendering
 
 - Surface: sphere tracing t ← t + κ|φ| (κ = 0.9), hit at |φ| < ε (1e-4 of the box diagonal) or at a sign change,

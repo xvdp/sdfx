@@ -18,9 +18,12 @@ Using it runs SuperFit code, under SuperFit's license. geolipi and sysl3d (its e
 
 ## Install and use
 
+SuperFit is not installed: its code is read from the `ext/superfit` submodule (or `SUPERFIT_ROOT`, a directory holding
+the `superfit/` package).
+
 ```bash
-pip install -e ".[superfit]"            # geolipi, sysl3d, sympy, trimesh (MIT / BSD)
-git submodule update --init ext/superfit   # SuperFit's code (or set SUPERFIT_ROOT to an installed superfit/ package)
+git submodule update --init ext/superfit
+pip install -e ".[superfit]"            # evaluation dependencies only: geolipi, sysl3d, sympy, trimesh (MIT / BSD)
 
 python -m sdfview superfit primitive_assembly.pkl -o assembly.sdfx --bake 192 [--device cuda] [--view]
 python -m sdfview superfit primitive_assembly.pkl -o assembly.sdfx --mesh input.obj   # in the input mesh's frame
@@ -37,8 +40,13 @@ sdf.n_primitives, sdf.primitive_types, sdf.metrics()
 Evaluation needs only SuperFit's `symbolic` and `torch_compute` subpackages, geolipi and sysl. SuperFit's
 `superfit/__init__.py` imports its whole fitting stack (cubvh, kaolin, fastsweep, drjit, cc3d, igl); when `superfit`
 is not already imported, `import_superfit` registers the package without running that `__init__` and imports the two
-subpackages directly. Fitting new assemblies needs SuperFit's own installation (its README: conda env, cubvh,
-kaolin) and runs on its scripts (`scripts/mesh_to_assembly.py`, `scripts/testset_fit_primitives.py`).
+subpackages directly.
+
+Fitting runs SuperFit's own script from the submodule, also without installing it:
+`PYTHONPATH=ext/superfit python ext/superfit/scripts/mesh_to_assembly.py --input_path mesh.obj --save_dir out --fastmode`
+(writes `out/final_content.pkl`; `experiments/compare_pat_sup.py --fit-superfit` does this per mesh). The Python that
+runs it needs SuperFit's fitting dependencies (its `env.yml` without `-e .`, plus cubvh and kaolin built from source as
+in its README), a CUDA GPU and a watertight input mesh.
 
 ## Assembly file
 
@@ -107,11 +115,28 @@ chunked evaluation, signs at primitive centres and far points, the mesh-frame ma
 rejection, the bulge = 0 warning, and the grid bake into an `.sdfx` scene. Not done here: real SuperFit fits
 (need its CUDA stack) and the released assemblies (Hugging Face, blocked in this environment).
 
+## Comparison with Points as Tori (`experiments/compare_pat_sup.py`)
+
+Both pipelines fit the same meshes and the fits go into one scene per mesh, `<out>/<shape>.sdfx`, to be toggled or
+overlaid in the viewer (`python -m sdfview view <shape>.sdfx`: G picks the opaque model, V overlays the others, T makes
+them translucent). Everything is in SuperFit's normalized frame. Models:
+
+- `pat`: PointsAsTori on an oriented point cloud sampled from the normalized mesh (uniform by area, face normals,
+  `--pat-points`, optional `--pat-noise`); native field (tori + BVH), grid bake and the input points;
+- `sup`: the assembly (`--assembly`, `--assembly-dir`, or fitted with `--fit-superfit`: SuperFit's
+  `mesh_to_assembly.py --fastmode` in a subprocess with `PYTHONPATH=ext/superfit`, `--superfit-python` for its
+  environment, `--superfit-gpu N` = this process's `cuda:N`, results reused unless `--refit`; a failed fit leaves
+  `sup` out), baked on a grid;
+- `gt`: the mesh's signed distance baked on a grid (cubvh 'raystab' as SuperFit, or the generalized winding number;
+  `--gt none` to leave it out).
+
+Fit times and counts are in the scene meta (`python -m sdfview info`). `--metrics` adds IoU@R, surface IoU,
+Chamfer@2048, SDF error and normal agreement with SuperFit's definitions where they apply (`<out>/metrics.jsonl`);
+validated on knot.obj (ground truth against itself: IoU 1, SDF error 0, Chamfer floor 0.11 from the 2048-point
+sampling). The two inputs differ (PAT: an oriented point cloud; SuperFit: a watertight mesh, which it remeshes), so
+the metrics describe each fit against the mesh, not one method under the other's conditions.
+
 ## Not done yet
 
 - Native GLSL for the assembly in sdfview (SuperFit generates it through sysl; its shader modules are Adobe-licensed,
   so they would be generated at run time from the user's SuperFit checkout rather than stored here).
-- Comparison: `experiments/compare_pat_sup.py` runs both models on the same meshes (SuperFit's normalized frame;
-  ground truth from cubvh 'raystab' as SuperFit, or the generalized winding number) and reports IoU@R, surface IoU,
-  Chamfer@2048, SDF error and normal agreement with SuperFit's definitions where they apply; validated here on
-  knot.obj (ground truth against itself: IoU 1, SDF error 0, Chamfer floor 0.11 from the 2048-point sampling).

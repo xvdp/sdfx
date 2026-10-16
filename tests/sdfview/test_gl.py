@@ -262,3 +262,42 @@ def test_cli(tmp_path, sphere, gl_ctx):
 	assert res.returncode == 0 and os.path.getsize(png) > 100, res.stderr
 	with open(png, 'rb') as f:
 		assert f.read(8) == b'\x89PNG\r\n\x1a\n'
+
+
+def test_overlay_of_models(gl_ctx):
+	"""Two models in a merged scene (spheres of radius 0.6 at x = ∓0.35): 'single' draws the selected one in its
+	model color, 'overlay' both (nearest wins), a translucent overlay blends the other one over the opaque one."""
+	from sdfview.backends.moderngl import Renderer
+	from sdfview.backends.moderngl.renderer import MODEL_COLORS
+	from sdfview.scene import merge_scenes
+
+	x = np.linspace(-1.2, 1.2, 40)
+	Z, Y, X = np.meshgrid(x, x, x, indexing='ij')
+	scenes = {}
+	for model, cx in (('pat', -0.35), ('sup', 0.35)):
+		s = Scene([-1.2] * 3, [1.2] * 3)
+		grid_field(s, model, np.sqrt((X - cx) ** 2 + Y**2 + Z**2) - 0.6, [-1.2] * 3, [1.2] * 3)
+		scenes[model] = s
+	r = Renderer(gl_ctx, merge_scenes(scenes))
+	assert r.models() == ['pat', 'sup']
+	cam = OrbitCamera.fit(r.box_min, r.box_max, up='y')  # looks along -z: the two spheres side by side in x
+
+	def hue_fraction(img, model):
+		"""Fraction of drawn pixels whose dominant channel matches the model's color (pat: red, sup: blue)."""
+		rgb = img[..., :3].astype(float)
+		drawn = np.any(img[..., :3] != 255, axis=-1)
+		channel = 0 if model == 'pat' else 2
+		return float((np.argmax(rgb, axis=-1) == channel)[drawn].mean())
+
+	single = r.render(cam, ViewSettings(surface_field='sup', show_cutplane=False), (96, 72))
+	assert hue_fraction(single, 'sup') > 0.95
+	overlay = r.render(cam, ViewSettings(surface_field='sup', surface_mode='overlay', show_cutplane=False), (96, 72))
+	assert 0.2 < hue_fraction(overlay, 'pat') < 0.8 and 0.2 < hue_fraction(overlay, 'sup') < 0.8
+	assert np.any(overlay[..., :3] != 255, axis=-1).sum() > np.any(single[..., :3] != 255, axis=-1).sum()
+	ghost = r.render(
+		cam,
+		ViewSettings(surface_field='sup', surface_mode='overlay', overlay_opacity=0.4, show_cutplane=False),
+		(96, 72),
+	)
+	assert not np.array_equal(ghost, overlay) and MODEL_COLORS['pat'][0] > MODEL_COLORS['pat'][2]
+	r.release()

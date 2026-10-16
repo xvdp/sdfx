@@ -44,6 +44,10 @@ FIELD TYPES
 	    params: isovalue;  "bounds": {"min", "max"} of the grid
 	    Any SDF evaluated with torch (PAT, SUP, a mesh SDF, an analytic shape) can be exported this way.
 
+Optional keys of a field or point cloud:
+	"model" — name of the model (fit) it belongs to: fields of one model (e.g. PAT's exact field and its grid bake)
+	          share it, so viewers can toggle or overlay models (one field per model). Default: the field's name.
+
 Unknown field types and keys must be ignored by readers (forward compatibility).
 """
 
@@ -205,3 +209,46 @@ def grid_field(scene: Scene, name: str, values: np.ndarray, bounds_min, bounds_m
 			'arrays': {'values': f'{name}/values'},
 		}
 	)
+
+
+def model_of(item: dict) -> str:
+	"""Model name of a field or point cloud ("model" key, else its name)."""
+	return item.get('model', item['name'])
+
+
+def merge_scenes(scenes: Dict[str, Scene], meta: Optional[dict] = None) -> Scene:
+	"""
+	One scene holding several models' scenes, e.g. {'pat': scene_a, 'sup': scene_b}: every array is renamed
+	'<model>/<name>', every field and point cloud gets "model": <model> and the name '<model>' (if its scene has one
+	field) or '<model>.<name>'; bounds = union of the scenes' bounds; meta = {'models': {model: scene meta}}.
+	"""
+	lo, hi = [], []
+	merged_meta = dict(meta or {})
+	merged_meta['models'] = {}
+	out_arrays, out_fields, out_pcs = {}, [], []
+	for model, scene in scenes.items():
+		rename = {name: f'{model}/{name}' for name in scene.arrays}
+		out_arrays.update({rename[n]: a for n, a in scene.arrays.items()})
+		for f in scene.fields:
+			g = json.loads(json.dumps(f))  # deep copy (plain JSON data)
+			g['name'] = model if len(scene.fields) == 1 else f'{model}.{f["name"]}'
+			g['model'] = model
+			g['arrays'] = {k: rename[v] for k, v in f.get('arrays', {}).items()}
+			out_fields.append(g)
+		for pc in scene.pointclouds:
+			q = dict(pc, name=f'{model}.{pc["name"]}', model=model)
+			for key in ('positions', 'normals', 'colors'):
+				if q.get(key):
+					q[key] = rename[q[key]]
+			out_pcs.append(q)
+		if scene.bounds_min is not None:
+			lo.append(scene.bounds_min)
+			hi.append(scene.bounds_max)
+		merged_meta['models'][model] = scene.meta
+	out = Scene(np.min(lo, axis=0) if lo else None, np.max(hi, axis=0) if hi else None, merged_meta)
+	for name, a in out_arrays.items():
+		out.add_array(name, a)
+	for f in out_fields:
+		out.add_field(f)
+	out.pointclouds = out_pcs
+	return out

@@ -1,43 +1,52 @@
 """
-Process the same shapes with Points as Tori (PAT) and SuperFit (SUP) and compare their SDFs with the input mesh.
+Fit the same shapes with Points as Tori (PAT) and SuperFit (SUP) and write both fits into one scene per shape, to be
+toggled or overlaid in the viewer; metrics optional (--metrics).
 
-	# SuperFit assemblies (e.g. the Hugging Face release) with the meshes they were fitted to
-	python experiments/compare_pat_sup.py --assembly A.pkl --mesh A.obj --device cuda:1 -o results/
+	# PAT fit + SuperFit fit (SuperFit's scripts/mesh_to_assembly.py from ext/superfit, run in a subprocess)
+	python experiments/compare_pat_sup.py --mesh a.obj b.obj --fit-superfit --device cuda:0 --superfit-gpu 1 -o out/
+	# PAT fit + existing SuperFit assemblies (e.g. the Hugging Face release) with the meshes they were fitted to
+	python experiments/compare_pat_sup.py --assembly A.pkl --mesh A.obj --device cuda -o out/
 	python experiments/compare_pat_sup.py --assembly-dir release/dataset/toys4k/superfrustum --mesh-root /data/toys4k \
-		--device cuda:1 -o results/ --limit 20
-	# PAT only, any meshes
-	python experiments/compare_pat_sup.py --mesh a.obj b.ply --device cuda -o results/
-	# fit SuperFit as well, with SuperFit's own environment (its scripts/mesh_to_assembly.py)
-	python experiments/compare_pat_sup.py --mesh a.obj --fit-superfit --superfit-python ~/conda/envs/superfit/bin/python \
-		--device cuda -o results/
+		--device cuda -o out/ --limit 20
+	# view: G cycles the opaque model, V overlays the others, T makes them translucent
+	python -m sdfview view out/<shape>.sdfx
 
-Per shape:
-  1. the mesh is read as SuperFit reads it (trimesh, force='mesh', process=False) and mapped to SuperFit's normalized
-     frame p_n = s (p - c), s = 1.8 / max bounding-box extent, c = bounding-box centre; everything below is in that frame;
-  2. ground truth φ_gt: --gt cubvh = SuperFit's own (cubvh signed_distance, mode 'raystab', CUDA); --gt gwn = the port's
-     mesh signed distance (closest-point distance through the torch BVH, sign from the generalized winding number,
-     inside where W > 1/2); 'auto' = cubvh if importable;
-  3. PAT: an oriented point cloud of --pat-points samples, uniform by area on the normalized mesh with face normals
-     (optionally noisy), then PointsAsTori (pre-trained network + torus fit), φ_pat = signed_distance (k = 32);
-  4. SUP: superfit_sdf.SuperFitSDF of the assembly (normalized frame, deterministic argmax reduction);
-  5. metrics per model, with the definitions of SuperFit's evaluation (algos/eval_tools.py) where they apply:
-	   iou@R          voxel IoU of {φ ≤ 0} on the R³ voxel centres (2i + 1)/R - 1 of [-1, 1]³ (SuperFit: R = 128)
-	   iou_gt_surface IoU of {φ ≤ 0} on 100k points p + n ⊙ u near the GT surface: p uniform by area, n its face
-	                  normal, u ~ U(-0.05, 0.05)³ elementwise (SuperFit's sample_surface_proximal_points)
-	   iou_pred_surface  the same around the model's surface (marching cubes of its R³ grid)
-	   bidir_surface_iou mean of the two
-	   cd_x100        Chamfer: 2048 points on each surface (GT mesh, model's marching-cubes mesh), mean squared
-	                  nearest distance in each direction, averaged, × 100 (SuperFit's CD_AVG@2048); its floor is the
-	                  sampling: the GT against its own 32³ marching-cubes surface gives 0.11 on knot.obj
-	   sdf_mae / sdf_median_ae  |φ - φ_gt| on the near-surface points
-	   normal_cos / normal_abs_cos  mean cos and |cos| between ∇φ (central differences, h = 1e-3) and the GT face
-	                  normal at GT surface samples
-	   time_*         seconds: PAT tori (network + fit) and grid evaluation; SUP grid evaluation, its fit time from the
-	                  assembly ('total_time'); counts: PAT points, SUP primitives
+Per shape, everything in SuperFit's normalized frame (the mesh read as SuperFit reads it, trimesh force='mesh',
+process=False, then p_n = s (p - c), s = 1.8 / max bounding-box extent, c = bounding-box centre):
+  pat  oriented point cloud of --pat-points samples, uniform by area on the normalized mesh with face normals
+       (optionally with Gaussian position noise --pat-noise), then PointsAsTori (pre-trained network + torus fit);
+       the scene holds its native field (tori + BVH, k = 32), a grid bake of it and the input points;
+  sup  SuperFit's assembly as superfit_sdf.SuperFitSDF (deterministic argmax reduction), baked on a grid; the assembly
+       is given (--assembly / --assembly-dir) or fitted (--fit-superfit);
+  gt   the input mesh's signed distance baked on a grid (--gt: cubvh 'raystab' as SuperFit, or the generalized winding
+       number; 'none' = no gt model).
+Output: <out>/<shape>.sdfx, the three scenes merged (sdfview.scene.merge_scenes; fields 'pat.pat', 'pat.pat_grid',
+'sup', 'gt'; point cloud 'pat.pat_points'); the fit times and counts are in the scene meta (python -m sdfview info).
+
+SuperFit fitting (--fit-superfit) runs ext/superfit/scripts/mesh_to_assembly.py --fastmode with PYTHONPATH=ext/superfit
+(SuperFit itself need not be installed) in --superfit-python, which must have SuperFit's fitting dependencies (its
+env.yml: cubvh, kaolin, fastsweep, drjit, cc3d, igl, geolipi, sysl3d); the input must be watertight. SuperFit runs on
+its process's CUDA device 0: --superfit-gpu N runs it on this process's cuda:N (CUDA_VISIBLE_DEVICES for the
+subprocess); a failed fit leaves 'sup' out of that shape's scene. Results go to <out>/superfit/<shape>/ (final_content.pkl, config.json) and are reused on later runs unless
+--refit; when neither SUPERFIT_CONFIG nor ext/superfit/superfit_config.json is set, its data_base (torch.compile cache
+of --fastmode) is <out>/superfit/data instead of a directory inside the submodule.
+
+--metrics also writes <out>/metrics.jsonl, one row per shape and model, with SuperFit's definitions
+(algos/eval_tools.py) where they apply:
+	iou@R          voxel IoU of {φ ≤ 0} on the R³ voxel centres (2i + 1)/R - 1 of [-1, 1]³ (SuperFit: R = 128)
+	iou_gt_surface IoU of {φ ≤ 0} on 100k points p + n ⊙ u near the GT surface: p uniform by area, n its face normal,
+	               u ~ U(-0.05, 0.05)³ elementwise (SuperFit's sample_surface_proximal_points)
+	iou_pred_surface  the same around the model's surface (marching cubes of its R³ grid)
+	bidir_surface_iou mean of the two
+	cd_x100        Chamfer: 2048 points on each surface (GT mesh, model's marching-cubes mesh), mean squared nearest
+	               distance in each direction, averaged, × 100 (SuperFit's CD_AVG@2048); its floor is the sampling:
+	               the GT against its own 32³ marching-cubes surface gives 0.11 on knot.obj
+	sdf_mae / sdf_median_ae  |φ - φ_gt| on the near-surface points
+	normal_cos / normal_abs_cos  mean cos and |cos| between ∇φ (central differences, h = 1e-3) and the GT face normal
+	               at GT surface samples
 Differences from SuperFit's own numbers: SuperFit evaluates against its remeshed watertight target (cubvh + fast
 sweeping + FlexiCubes), not the input mesh, and takes the best of ~100 Gumbel samples of the assembly; here the input
-mesh and the argmax assembly. Results: <out>/metrics.jsonl (one row per shape and model) and a summary table; with
---scenes, .sdfx scenes of the GT grid and of both models (python -m sdfview view <file>).
+mesh and the argmax assembly.
 """
 
 from __future__ import annotations
@@ -46,6 +55,7 @@ import argparse
 import glob
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -54,6 +64,7 @@ import numpy as np
 import torch
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+SUPERFIT_DIR = os.path.join(REPO, 'ext', 'superfit')
 sys.path.insert(0, REPO)
 
 import points_as_tori as pat  # noqa: E402
@@ -221,18 +232,44 @@ def run_pat(vertices, faces, n_points: int, seed: int, noise: float):
 	return sdf, time.perf_counter() - t
 
 
-def fit_superfit(mesh_path: str, out_dir: str, python: str) -> str:
-	"""Run SuperFit's scripts/mesh_to_assembly.py (its own environment); returns the written assembly."""
-	save_dir = os.path.join(out_dir, 'superfit', os.path.splitext(os.path.basename(mesh_path))[0])
+def fit_superfit(
+	mesh_path: str, save_dir: str, python: str, gpu=None, extra_args: str = '', refit: bool = False
+) -> str:
+	"""
+	SuperFit fit of one mesh: ext/superfit/scripts/mesh_to_assembly.py --fastmode in a subprocess (PYTHONPATH =
+	ext/superfit, no installation); returns save_dir/final_content.pkl (reused unless refit).
+	"""
+	assembly = os.path.join(save_dir, 'final_content.pkl')
+	if os.path.isfile(assembly) and not refit:
+		print(f'  SuperFit: reusing {assembly}', flush=True)
+		return assembly
+	script = os.path.join(SUPERFIT_DIR, 'scripts', 'mesh_to_assembly.py')
+	if not os.path.isfile(script):
+		raise FileNotFoundError(f'{script} not found: git submodule update --init ext/superfit')
 	os.makedirs(save_dir, exist_ok=True)
-	cmd = [python, 'scripts/mesh_to_assembly.py', '--input_path', os.path.abspath(mesh_path), '--save_dir', save_dir,
-		   '--fastmode']  # fmt: skip
-	print('  ' + ' '.join(cmd), flush=True)
-	subprocess.run(cmd, cwd=os.path.join(REPO, 'ext', 'superfit'), check=True)
-	found = [f for f in glob.glob(os.path.join(save_dir, '**', '*.pkl'), recursive=True) if 'stepwise' not in f]
-	if not found:
-		raise FileNotFoundError(f'no assembly .pkl written under {save_dir}')
-	return sorted(found, key=os.path.getmtime)[-1]
+	env = dict(os.environ)
+	env['PYTHONPATH'] = os.pathsep.join([SUPERFIT_DIR] + [x for x in [env.get('PYTHONPATH')] if x])
+	if gpu is not None:  # torch's cuda:<gpu> in this process, through this process's CUDA_VISIBLE_DEVICES if set
+		visible = [x.strip() for x in env.get('CUDA_VISIBLE_DEVICES', '').split(',') if x.strip()]
+		env['CUDA_VISIBLE_DEVICES'] = visible[int(gpu)] if visible else str(gpu)
+	if not env.get('SUPERFIT_CONFIG') and not os.path.isfile(os.path.join(SUPERFIT_DIR, 'superfit_config.json')):
+		# SuperFit's paths default to directories inside its repository (torch.compile cache: <data_base>/project_sf/aot)
+		base = os.path.dirname(os.path.abspath(save_dir))
+		cfg = os.path.join(base, 'superfit_config.json')
+		with open(cfg, 'w') as f:
+			json.dump({'data_base': os.path.join(base, 'data'), 'outputs_base': os.path.join(base, 'outputs')}, f)
+		env['SUPERFIT_CONFIG'] = cfg
+	cmd = [python, script, '--input_path', os.path.abspath(mesh_path), '--save_dir', os.path.abspath(save_dir),
+		   '--fastmode'] + shlex.split(extra_args)  # fmt: skip
+	print('  SuperFit: ' + ' '.join(shlex.quote(x) for x in cmd), flush=True)
+	if torch.cuda.is_available():
+		torch.cuda.empty_cache()  # this process's cached blocks, so SuperFit can use the GPU memory
+	t = time.perf_counter()
+	subprocess.run(cmd, cwd=SUPERFIT_DIR, env=env, check=True)
+	print(f'  SuperFit: {time.perf_counter() - t:.1f} s', flush=True)
+	if not os.path.isfile(assembly):
+		raise FileNotFoundError(f'SuperFit wrote no {assembly}')
+	return assembly
 
 
 def assembly_mesh_path(assembly: str, mesh_root: str) -> str:
@@ -256,58 +293,70 @@ def assembly_mesh_path(assembly: str, mesh_root: str) -> str:
 # ----------------------------------------------------------------------------------------------- driver
 
 
+def gt_scene(gt, res: int, device, dtype, meta: dict):
+	from sdfview.scene import Scene, grid_field
+	from sdfview.sources.grid import bake_grid
+
+	lo, hi = [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]
+	scene = Scene(bounds_min=lo, bounds_max=hi, meta=dict(meta, source='ground truth', method=gt.method))
+	grid_field(scene, 'gt', bake_grid(gt, lo, hi, res, device=device, dtype=dtype), lo, hi)
+	return scene
+
+
+def metrics_context(gt, Vn, F, res: int, seed: int, device, dtype) -> dict:
+	grid, axis = voxel_centres(res, device, dtype)
+	gt_surface = surface_samples(Vn, F, NEAR_SURFACE_POINTS, seed)
+	near = near_surface(*gt_surface, seed + 5)
+	return {'res': res, 'seed': seed, 'grid': grid, 'axis': axis, 'gt_occ': evaluate_chunked(gt, grid) <= 0,
+			'gt_surface': gt_surface, 'near': near, 'near_gt': evaluate_chunked(gt, near),
+			'gt_chamfer': surface_samples(Vn, F, CHAMFER_POINTS, seed + 2)[0]}  # fmt: skip
+
+
 def process(name, mesh_path, assembly, a, device, dtype, out_dir):
+	"""Fit / load the models of one shape and write <out_dir>/<name>.sdfx; returns (scene path, metric rows)."""
+	from sdfview.scene import merge_scenes
+
 	V, F = read_mesh(mesh_path)
 	Vn, s, c = normalize(V)
-	gt = GroundTruth(Vn, F, a.gt, device)
-	grid, axis = voxel_centres(a.res, device, dtype)
-	gt_surface = surface_samples(Vn, F, NEAR_SURFACE_POINTS, a.seed)
-	near = near_surface(*gt_surface, a.seed + 5)
-	ctx = {'res': a.res, 'seed': a.seed, 'grid': grid, 'axis': axis, 'gt_occ': evaluate_chunked(gt, grid) <= 0,
-		   'gt_surface': gt_surface, 'near': near, 'near_gt': evaluate_chunked(gt, near),
-		   'gt_chamfer': surface_samples(Vn, F, CHAMFER_POINTS, a.seed + 2)[0]}  # fmt: skip
-	common = {'shape': name, 'mesh': mesh_path, 'faces': int(F.shape[0]), 'gt': gt.method, 'scale': s}
-	rows = []
+	gt = GroundTruth(Vn, F, a.gt, device) if a.gt != 'none' else None
+	ctx = metrics_context(gt, Vn, F, a.res, a.seed, device, dtype) if a.metrics else None
+	common = {'shape': name, 'mesh': mesh_path, 'faces': int(F.shape[0]), 'scale': s}
+	scenes, rows = {}, []
 
 	if not a.skip_pat:
-		sdf, t_fit = run_pat(Vn, F, a.pat_points, a.seed, a.pat_noise)
-		row = {**common, 'model': 'PAT', 'points': a.pat_points, 'time_fit': t_fit}
-		row.update(model_metrics(sdf.signed_distance, gt, ctx))
-		rows.append(row)
-		if a.scenes:
-			from sdfview.sources.pat import scene_from_pat
+		from sdfview.sources.pat import scene_from_pat
 
-			scene_from_pat(sdf, bake_resolution=a.res, meta={'input': mesh_path}).save(
-				os.path.join(out_dir, f'{name}.pat.sdfx')
-			)
+		sdf, t_fit = run_pat(Vn, F, a.pat_points, a.seed, a.pat_noise)
+		print(f'  PAT: {a.pat_points} points, {t_fit:.2f} s', flush=True)
+		meta = {'input': mesh_path, 'pat_points': a.pat_points, 'pat_noise': a.pat_noise, 'time_fit': t_fit}
+		scenes['pat'] = scene_from_pat(sdf, bake_resolution=a.res, meta=meta)
+		if ctx is not None:
+			rows.append({**common, 'model': 'PAT', 'points': a.pat_points, 'time_fit': t_fit,
+						 **model_metrics(sdf.signed_distance, gt, ctx)})  # fmt: skip
 
 	if assembly is not None:
+		from sdfview.sources.superfit import scene_from_superfit
 		from superfit_sdf import SuperFitSDF
 
 		sup = SuperFitSDF(assembly, program=a.program, device=device, dtype=dtype)
-		row = {**common, 'model': 'SUP', 'assembly': assembly, 'program': sup.program, 'primitives': sup.n_primitives}
 		fit_time = sup.data.get('total_time')
-		row['time_fit'] = float(fit_time) if fit_time is not None else float('nan')
-		row.update(model_metrics(sup, gt, ctx))
-		rows.append(row)
-		if a.scenes:
-			from sdfview.sources.superfit import scene_from_superfit
+		fit_time = float(fit_time) if fit_time is not None else float('nan')
+		print(f'  SUP: {sup.n_primitives} primitives ({sup.program}), fit {fit_time:.1f} s', flush=True)
+		meta = {'input': assembly, 'mesh': mesh_path, 'time_fit': fit_time}
+		scenes['sup'] = scene_from_superfit(sup, resolution=a.res, meta=meta)
+		if ctx is not None:
+			rows.append({**common, 'model': 'SUP', 'assembly': assembly, 'program': sup.program,
+						 'primitives': sup.n_primitives, 'time_fit': fit_time, **model_metrics(sup, gt, ctx)})  # fmt: skip
 
-			scene_from_superfit(sup, resolution=a.res, meta={'input': assembly}).save(
-				os.path.join(out_dir, f'{name}.sup.sdfx')
-			)
-
-	if a.scenes:
-		from sdfview.scene import Scene, grid_field
-		from sdfview.sources.grid import bake_grid
-
-		scene = Scene(
-			bounds_min=[-1, -1, -1], bounds_max=[1, 1, 1], meta={'input': mesh_path, 'source': 'ground truth'}
-		)
-		values = bake_grid(gt, [-1, -1, -1], [1, 1, 1], a.res, device=device, dtype=dtype)
-		grid_field(scene, 'gt', values, [-1, -1, -1], [1, 1, 1])
-		scene.save(os.path.join(out_dir, f'{name}.gt.sdfx'))
-	return rows
+	if gt is not None:
+		scenes['gt'] = gt_scene(gt, a.res, device, dtype, {'input': mesh_path})
+	if not scenes:
+		return None, rows
+	frame = {'frame': 'superfit_normalized', 'scale': float(s), 'center': [float(x) for x in c]}
+	scene = merge_scenes(scenes, meta={'input': mesh_path, **frame})
+	path = os.path.join(out_dir, f'{name}.sdfx')
+	scene.save(path)
+	return path, rows
 
 
 def shapes(a, out_dir):
@@ -325,61 +374,78 @@ def shapes(a, out_dir):
 	if assemblies and not meshes:
 		meshes = [assembly_mesh_path(x, a.mesh_root) for x in assemblies]
 	for i, mesh in enumerate(meshes[: a.limit or None]):
+		name = os.path.splitext(os.path.basename(mesh))[0]
 		assembly = assemblies[i] if assemblies else None
 		if assembly is None and a.fit_superfit:
-			assembly = fit_superfit(mesh, out_dir, a.superfit_python)
-		yield os.path.splitext(os.path.basename(mesh))[0], mesh, assembly
+			save_dir = os.path.join(out_dir, 'superfit', name)
+			try:
+				assembly = fit_superfit(mesh, save_dir, a.superfit_python, a.superfit_gpu, a.superfit_args, a.refit)
+			except subprocess.CalledProcessError as e:  # e.g. a mesh that is not watertight: the scene without 'sup'
+				print(f'  SuperFit FAILED for {name} (exit {e.returncode}); see its output above', flush=True)
+		yield name, mesh, assembly
 
 
 def main(argv=None):
 	ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-	ap.add_argument('--mesh', nargs='+', help='input meshes (pair with --assembly, or PAT only)')
-	ap.add_argument('--assembly', nargs='+', help='SuperFit primitive_assembly.pkl files')
+	ap.add_argument('--mesh', nargs='+', help='input meshes (watertight for SuperFit fitting)')
+	ap.add_argument('--assembly', nargs='+', help='SuperFit assemblies (.pkl), paired with --mesh')
 	ap.add_argument('--assembly-dir', help='directory searched for primitive_assembly.pkl (e.g. the HF release)')
 	ap.add_argument('--mesh-root', help="root to re-root the assemblies' stored mesh paths under")
 	ap.add_argument('--fit-superfit', action='store_true', help='fit SuperFit for meshes without an assembly')
-	ap.add_argument('--superfit-python', default=sys.executable, help="python of SuperFit's environment")
+	ap.add_argument('--superfit-python', default=sys.executable, help="python with SuperFit's fitting dependencies")
+	ap.add_argument('--superfit-gpu', default=None, help='CUDA_VISIBLE_DEVICES for the SuperFit fit')
+	ap.add_argument('--superfit-args', default='', help="extra mesh_to_assembly.py arguments, e.g. '--ablation 8'")
+	ap.add_argument('--refit', action='store_true', help='fit SuperFit again even if its result exists')
 	ap.add_argument('--program', default='best', help="assembly program: 'best', 'latest' or a key")
 	ap.add_argument('-o', '--out', required=True, help='output directory')
-	ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+	ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', help='PAT / evaluation device')
 	ap.add_argument('--float64', action='store_true', help='float64 geometry (default float32)')
-	ap.add_argument('--gt', default='auto', choices=['auto', 'cubvh', 'gwn'])
-	ap.add_argument('--res', type=int, default=128, help='grid resolution of the IoU and of the surfaces')
+	ap.add_argument('--gt', default='auto', choices=['auto', 'cubvh', 'gwn', 'none'], help='ground-truth model')
+	ap.add_argument('--res', type=int, default=128, help='grid resolution of the bakes (and of the metrics)')
 	ap.add_argument('--pat-points', type=int, default=50_000, help='PAT input point cloud size')
 	ap.add_argument('--pat-noise', type=float, default=0.0, help='Gaussian position noise of the PAT input')
 	ap.add_argument('--skip-pat', action='store_true')
-	ap.add_argument('--scenes', action='store_true', help='also write .sdfx scenes (GT, PAT, SUP)')
+	ap.add_argument('--metrics', action='store_true', help='also compute metrics against the ground truth')
 	ap.add_argument('--limit', type=int, default=0, help='first N shapes only')
 	ap.add_argument('--seed', type=int, default=0)
 	a = ap.parse_args(argv)
 	if not (a.mesh or a.assembly or a.assembly_dir):
 		ap.error('give --mesh, --assembly or --assembly-dir')
+	if a.metrics and a.gt == 'none':
+		ap.error('--metrics needs a ground truth (--gt auto, cubvh or gwn)')
 
 	dtype = torch.float64 if a.float64 else torch.float32
 	pat.set_device(a.device, dtype)
 	device = config.get_device()
 	os.makedirs(a.out, exist_ok=True)
 	results = os.path.join(a.out, 'metrics.jsonl')
-	all_rows = []
-	with open(results, 'a') as f:
-		for name, mesh, assembly in shapes(a, a.out):
-			print(f'--- {name}: {mesh}' + (f' | {assembly}' if assembly else ''), flush=True)
-			try:
-				rows = process(name, mesh, assembly, a, device, dtype, a.out)
-			except Exception:  # noqa: BLE001  (one bad shape does not stop a dataset run)
-				import traceback
+	all_rows, written = [], []
+	for name, mesh, assembly in shapes(a, a.out):
+		print(f'--- {name}: {mesh}' + (f' | {assembly}' if assembly else ''), flush=True)
+		try:
+			path, rows = process(name, mesh, assembly, a, device, dtype, a.out)
+		except Exception:  # noqa: BLE001  (one bad shape does not stop a dataset run)
+			import traceback
 
-				print(f'  FAILED {name}:', flush=True)
-				traceback.print_exc()
-				continue
+			print(f'  FAILED {name}:', flush=True)
+			traceback.print_exc()
+			continue
+		if path:
+			written.append(path)
+			print(f'  wrote {path}', flush=True)
+		if rows:
+			with open(results, 'a') as f:
+				for row in rows:
+					f.write(json.dumps(row) + '\n')
+			all_rows += rows
 			for row in rows:
-				f.write(json.dumps(row) + '\n')
-				f.flush()
-				all_rows.append(row)
 				print('  ' + ', '.join(f'{k} {v:.4g}' if isinstance(v, float) else f'{k} {v}' for k, v in row.items()
 										if k not in ('mesh', 'assembly', 'shape')), flush=True)  # fmt: skip
-	summary(all_rows, a.res)
-	print(f'wrote {results}')
+	if all_rows:
+		summary(all_rows, a.res)
+		print(f'wrote {results}')
+	if written:
+		print(f'view: python -m sdfview view {written[0]}   (G: opaque model, V: overlay, T: translucent)')
 
 
 def summary(rows, res):

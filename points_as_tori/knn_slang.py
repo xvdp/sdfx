@@ -172,6 +172,8 @@ class SlangKNN:
 	points_as_tori.bvh.BVH.find_k_nearest. `bvh`: a points_as_tori.bvh.BVH over the same points (built if None).
 	`variant`: 'heap' (held set as a max-heap, as the original C++ BVH: O(log k) per accepted candidate) or 'scan'
 	(unsorted array, as the GLSL / demo shader: O(k) per accepted candidate). Same neighbors up to ties.
+	Precision: float32; the heap kernel runs in float64 when config.SLANG_FLOAT64 is set and the points are float64
+	(fixed at construction).
 	"""
 
 	VARIANTS = {'heap': 'knn', 'scan': 'knn_scan'}
@@ -182,6 +184,11 @@ class SlangKNN:
 		if variant not in self.VARIANTS:
 			raise ValueError(f'variant must be one of {list(self.VARIANTS)}, got {variant!r}')
 		self.variant = variant
+		self.real = (
+			torch.float64
+			if (config.SLANG_FLOAT64 and points.dtype == torch.float64 and variant == 'heap')
+			else torch.float32
+		)
 		self.points = points
 		self.bvh = BVH(points) if bvh is None else bvh
 		self.n_points = points.shape[1]
@@ -192,10 +199,10 @@ class SlangKNN:
 
 		t = self.bvh.tree
 		M = t.n_nodes
-		bounds = torch.zeros((M, 8), dtype=torch.float32, device=points.device)
+		bounds = torch.zeros((M, 8), dtype=self.real, device=points.device)
 		bounds[:, 0:3] = t.bounds_min.T
 		bounds[:, 4:7] = t.bounds_max.T
-		pts = torch.zeros((self.n_points, 4), dtype=torch.float32, device=points.device)
+		pts = torch.zeros((self.n_points, 4), dtype=self.real, device=points.device)
 		pts[:, 0:3] = points.T
 		arrays = {
 			'bvh_bounds': bounds.reshape(2 * M, 4),
@@ -212,19 +219,21 @@ class SlangKNN:
 		return spy.Tensor.from_numpy(self.device, np.ascontiguousarray(a.cpu().numpy()))
 
 	def _run(self, q: torch.Tensor, k: int, k_max: int) -> Tuple[torch.Tensor, torch.Tensor]:
-		"""(3, m) float32 queries -> (m, k) int32 indices, (m, k) float32 distances, on the torch device."""
+		"""(3, m) queries in self.real -> (m, k) int32 indices, (m, k) distances in self.real, on the torch device."""
 		spy = _spy()
 		m = q.shape[1]
-		kernel = getattr(self.module, self.VARIANTS[self.variant])
+		name = 'knn_f64' if self.real == torch.float64 else self.VARIANTS[self.variant]
+		kernel = getattr(self.module, name)
+		np_real = np.float64 if self.real == torch.float64 else np.float32
 		fn = kernel.constants({'BVH_K_MAX': k_max, 'BVH_STACK_SIZE': self.stack_size})
 		a = self.arrays
 		if self.on_host:
 			out_i = spy.Tensor.from_numpy(self.device, np.full((m, k), -1, dtype=np.int32))
-			out_d = spy.Tensor.from_numpy(self.device, np.zeros((m, k), dtype=np.float32))
+			out_d = spy.Tensor.from_numpy(self.device, np.zeros((m, k), dtype=np_real))
 			qs = spy.Tensor.from_numpy(self.device, np.ascontiguousarray(q.T.cpu().numpy()))
 		else:
 			out_i = torch.full((m, k), -1, dtype=torch.int32, device=self.torch_device)
-			out_d = torch.zeros((m, k), dtype=torch.float32, device=self.torch_device)
+			out_d = torch.zeros((m, k), dtype=self.real, device=self.torch_device)
 			qs = q.T.contiguous()
 		args = (spy.call_id(), qs, a['bvh_bounds'], a['bvh_nodes'], a['bvh_prims'], a['points'], k, out_i, out_d)
 		if self.on_host:
@@ -240,7 +249,7 @@ class SlangKNN:
 	def find_k_nearest(self, queries: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
 		"""
 		(3, Q) queries (or one (3,) query) -> (indices (Q, k) int64, distances (Q, k) in the queries' dtype), nearest
-		first, k = min(k, N). Distances in another dtype than float32 are recomputed in that dtype from the indices.
+		first, k = min(k, N). Distances in another dtype than the kernel's are recomputed in that dtype from the indices.
 		"""
 		single = queries.ndim == 1
 		q_all = queries[:, None] if single else queries
@@ -256,10 +265,10 @@ class SlangKNN:
 			for s in range(0, n, chunk):
 				e = min(n, s + chunk)
 				q = q_all[:, s:e]
-				i32, d32 = self._run(q.to(torch.float32), k, k_max)
+				i32, d = self._run(q.to(self.real), k, k_max)
 				idx[s:e] = i32.long()
-				if q.dtype == torch.float32:
-					dist[s:e] = d32
+				if q.dtype == self.real:
+					dist[s:e] = d
 				else:
 					diff = q[:, :, None] - self.points[:, idx[s:e]]
 					dist[s:e] = torch.sqrt((diff * diff).sum(dim=0))
