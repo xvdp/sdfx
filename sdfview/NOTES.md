@@ -1,7 +1,7 @@
 # sdfview — notes
 
-Viewer for signed distance fields produced with torch. First field type: Points as Tori (`points_as_tori`);
-second: any SDF sampled on a grid (the route for SUP and for comparisons).
+Viewer for signed distance fields produced with torch. Field types: Points as Tori (`pat`: points, tori, BVH), any SDF
+sampled on a grid (`grid`), and generated GLSL (`glsl`: a SuperFit assembly as the composition of its primitives).
 
 ## Layout
 
@@ -12,7 +12,7 @@ sdfview/
   accel/lbvh.py            re-export of the LBVH builder in points_as_tori/bvh.py (port of the original bvh.cpp)
   sources/pat.py           PointsAsTori -> scene (points, tori, BVH, point cloud, optional grid bake)
   sources/grid.py          any torch SDF -> regular grid, in z-slabs
-  sources/superfit.py      SuperFit primitive assembly (superfit_sdf) -> grid-baked scene
+  sources/superfit.py      SuperFit primitive assembly (superfit_sdf) -> generated GLSL field (+ optional grid bake)
   shaders/__init__.py      GLSL assembly: version header per target (gl330 | webgl2) + #include resolution
   shaders/glsl/            modules: common, bvh, field_pat, field_grid, field, camera, colormap
                            programs: fullscreen.vert, surface.frag, cutplane.{vert,frag}, points.{vert,frag},
@@ -33,7 +33,10 @@ with the same textures).
 Specified in `scene.py` (docstring). One file: `SDFX`, version, JSON length, binary length, JSON (padded to 16 B),
 binary chunk (each array 16 B aligned). Arrays are stored in the layout the shaders fetch (one texel per row of
 4 values), so backends upload them without reshuffling; the torch side is structure-of-arrays (3, n) and converts
-once at export. Field types: `pat` (points, tori, BVH) and `grid` (vertex-aligned samples).
+once at export. Field types: `pat` (points, tori, BVH), `grid` (vertex-aligned samples) and `glsl` (generated code
+stored in the manifest, no arrays; the viewer inserts it before `field.glsl`, compiled with `FIELD_GLSL`: entry points
+`assemblyDistance`, `assemblyPartDistance`, `assemblyParts`, `assemblyNearestPart`, uniform `field_part` = −1 whole,
+−2 all parts, i part i; see superfit_sdf/NOTES.md).
 
 ## LBVH (points_as_tori/bvh.py, re-exported as sdfview.accel.lbvh)
 
@@ -104,6 +107,12 @@ tagged `"model"` (an optional key; older readers ignore it), bounds = union. The
 
 Coincident surfaces in an opaque overlay alternate pixel by pixel (depth fighting); the translucent mode shows them
 without it.
+
+Field choice per model (`Renderer.model_field`; 'auto' = the first model's): surfaces take the cheapest field to
+trace (`glsl`, then `grid`, then `pat`), the cut plane the exact one (`glsl` / `pat`, then `grid`).
+
+Fields with parts (`glsl`): keys `[` / `]` cycle the whole assembly → all parts as separate solids → part 0, 1, ...
+(`ViewSettings.part`, `--part`); `U` colors the surface by part (`color_parts`, `--color-parts`; golden-ratio hues).
 
 ## Rendering
 

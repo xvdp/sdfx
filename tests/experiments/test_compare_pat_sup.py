@@ -97,8 +97,9 @@ def test_both_fits_in_one_scene(tmp_path, cpu64, monkeypatch):
 	cmp.main(['--mesh', knot, '--assembly', assembly, '-o', str(out), '--device', 'cpu', '--float64', '--res', '20',
 			  '--pat-points', '3000', '--gt', 'gwn', '--metrics'])  # fmt: skip
 	scene = Scene.load(str(out / 'knot.sdfx'))
-	assert [f['name'] for f in scene.fields] == ['pat.pat', 'pat.pat_grid', 'sup', 'gt']
-	assert [model_of(f) for f in scene.fields] == ['pat', 'pat', 'sup', 'gt']
+	assert [f['name'] for f in scene.fields] == ['pat.pat', 'pat.pat_grid', 'sup.sup', 'sup.sup_grid', 'gt']
+	assert [model_of(f) for f in scene.fields] == ['pat', 'pat', 'sup', 'sup', 'gt']
+	assert scene.field('sup.sup')['type'] == 'glsl' and scene.field('sup.sup')['glsl']['n_parts'] == 2
 	assert [pc['name'] for pc in scene.pointclouds] == ['pat.pat_points']
 	assert scene.meta['frame'] == 'superfit_normalized' and set(scene.meta['models']) == {'pat', 'sup', 'gt'}
 	assert scene.meta['models']['pat']['n_points'] == 3000 and scene.meta['models']['sup']['n_primitives'] == 2
@@ -113,7 +114,7 @@ def test_both_fits_in_one_scene(tmp_path, cpu64, monkeypatch):
 	out2 = tmp_path / 'out2'
 	cmp.main(['--mesh', knot, '--assembly', assembly, '-o', str(out2), '--device', 'cpu', '--float64', '--res', '16',
 			  '--skip-pat', '--gt', 'none'])  # fmt: skip
-	assert [f['name'] for f in Scene.load(str(out2 / 'knot.sdfx')).fields] == ['sup']
+	assert [f['name'] for f in Scene.load(str(out2 / 'knot.sdfx')).fields] == ['sup.sup', 'sup.sup_grid']
 	assert not (out2 / 'metrics.jsonl').exists()
 
 

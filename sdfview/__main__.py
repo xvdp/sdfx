@@ -33,13 +33,17 @@ def _settings(a):
 		k=a.k,
 		surface_mode='overlay' if a.overlay else 'single',
 		overlay_opacity=a.opacity,
+		part=a.part,
+		color_parts=a.color_parts,
 	)
 
 
 def _view_args(p):
 	p.add_argument('--up', default='y', choices=['x', 'y', 'z'], help='world up axis for the orbit camera')
-	p.add_argument('--surface', default='auto', help="surface field: name, 'pat', 'grid' or 'auto' (grid if any)")
-	p.add_argument('--cut-field', default='auto', help="cut plane field: name, 'pat', 'grid' or 'auto' (exact field)")
+	p.add_argument(
+		'--surface', default='auto', help="surface field: name or type, or 'auto' (the first model's cheapest to trace)"
+	)
+	p.add_argument('--cut-field', default='auto', help="cut plane field: name or type, or 'auto' (exact field)")
 	p.add_argument('--overlay', action='store_true', help='draw every model of a merged scene (key V)')
 	p.add_argument('--opacity', type=float, default=1.0, help='opacity of the other models in overlay (key T)')
 	p.add_argument('--no-surface', action='store_true')
@@ -50,6 +54,8 @@ def _view_args(p):
 	p.add_argument('--clip', action='store_true', help='hide the surface in front of the cut plane')
 	p.add_argument('--isovalue', type=float, default=0.0)
 	p.add_argument('--k', type=int, default=None, help='PAT neighbors (default: the scene value)')
+	p.add_argument('--part', type=int, default=-1, help='assembly: -1 whole, -2 all parts, i: part i alone (keys [ ])')
+	p.add_argument('--color-parts', action='store_true', help='assembly: color by part (key U)')
 
 
 def cmd_pat(a):
@@ -89,14 +95,22 @@ def cmd_superfit(a):
 	)
 	t_load = time.perf_counter() - t
 	t = time.perf_counter()
-	scene = scene_from_superfit(sdf, resolution=a.bake, meta={'input': a.input})
-	print(f'{sdf}: load {t_load:.2f} s, bake {a.bake}³ {time.perf_counter() - t:.2f} s')
-	scene.save(a.output)
-	print(f'wrote {a.output}: {scene}')
+	scene = scene_from_superfit(sdf, resolution=a.bake or None, meta={'input': a.input}, glsl=not a.no_glsl)
+	baked = f', bake {a.bake}³' if a.bake else ''
+	print(f'{sdf}: load {t_load:.2f} s, export{baked} {time.perf_counter() - t:.2f} s')
+	if a.output:
+		scene.save(a.output)
+		print(f'wrote {a.output}: {scene}')
+	if a.shadertoy:
+		from superfit_sdf.glsl import assembly_shadertoy
+
+		with open(a.shadertoy, 'w') as f:
+			f.write(assembly_shadertoy(sdf))
+		print(f'wrote {a.shadertoy}: Shadertoy-style fragment code (mainImage; #define PART / COLOR_PARTS)')
 	if a.view:
 		from . import show
 
-		show(scene, up=a.up)
+		show(scene, _settings(a), up=a.up)
 
 
 def cmd_view(a):
@@ -166,18 +180,22 @@ def main(argv=None):
 	p.add_argument('--up', default='y', choices=['x', 'y', 'z'])
 	p.set_defaults(func=cmd_pat)
 
-	p = sub.add_parser('superfit', help='SuperFit primitive assembly (.pkl) -> scene (.sdfx), baked on a grid')
+	p = sub.add_parser(
+		'superfit', help='SuperFit primitive assembly (.pkl) -> scene (.sdfx): generated GLSL, optional grid bake'
+	)
 	p.add_argument('input', help='primitive_assembly.pkl (loaded with an allow-list unpickler)')
-	p.add_argument('-o', '--output', required=True)
+	p.add_argument('-o', '--output', default=None, help='scene file (.sdfx)')
+	p.add_argument('--shadertoy', default=None, help='also write Shadertoy-style GLSL (mainImage) to this file')
+	p.add_argument('--no-glsl', action='store_true', help='no generated GLSL field (then --bake is needed)')
 	p.add_argument('--program', default='best', help="'best' (as SuperFit's get_best_expr), 'latest' or a key")
 	p.add_argument(
 		'--mesh', default=None, help="input mesh: evaluate in its frame (default: SuperFit's normalized frame)"
 	)
-	p.add_argument('--bake', type=int, default=192, help='grid samples per side')
+	p.add_argument('--bake', type=int, default=0, help='also bake the torch evaluation on a grid of N per side')
 	p.add_argument('--device', default='cpu', help="torch device, e.g. 'cuda'")
 	p.add_argument('--float64', action='store_true')
 	p.add_argument('--view', action='store_true', help='open the viewer afterwards')
-	p.add_argument('--up', default='y', choices=['x', 'y', 'z'])
+	_view_args(p)
 	p.set_defaults(func=cmd_superfit)
 
 	p = sub.add_parser('view', help='open a window')

@@ -36,6 +36,7 @@ pickle as bytes reloaded by torch.load(weights_only=False), are reloaded with we
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 import io
 import os
@@ -158,9 +159,13 @@ def import_superfit():
 	except ImportError as e:
 		raise ImportError('SuperFit assemblies need geolipi and sysl3d: pip install -e ".[superfit]"') from e
 	if 'superfit' not in sys.modules:
+		root = superfit_root()
 		package = types.ModuleType('superfit')
-		package.__path__ = [superfit_root()]
+		package.__path__ = [root]
 		package.__file__ = None
+		# a package spec, so importlib.util.find_spec('superfit') keeps working (it raises on __spec__ = None)
+		package.__spec__ = importlib.machinery.ModuleSpec('superfit', None, is_package=True)
+		package.__spec__.submodule_search_locations = [root]
 		sys.modules['superfit'] = package
 	import superfit.symbolic
 	import superfit.symbolic.primitives as primitives

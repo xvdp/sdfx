@@ -14,7 +14,7 @@ class ViewSettings:
 	show_surface: bool = True
 	show_cutplane: bool = True
 	show_points: bool = False
-	surface_field: str = 'auto'  # field name or type; 'auto': a grid if the scene has one (fast), else the first field
+	surface_field: str = 'auto'  # field name or type; 'auto': the cheapest to trace (generated GLSL, grid, PAT)
 	cut_field: str = 'auto'  # 'auto': the first non-grid field (exact), else the grid
 	# several models in one scene (fields with a "model" key, sdfview.scene.merge_scenes):
 	#   'single'   the surface of surface_field only (toggle between models by changing it)
@@ -23,6 +23,11 @@ class ViewSettings:
 	surface_mode: str = 'single'
 	overlay_opacity: float = 1.0  # < 1: the other models blend over (no depth write), so surfaces behind stay visible
 	model_colors: Optional[dict] = None  # {model: (r, g, b)}; default: palette (pat tan, sup blue, gt grey, ...)
+
+	# fields with parts (type "glsl", e.g. a SuperFit assembly): -1 the assembly, -2 its parts as separate solids,
+	# i >= 0 part i alone; color_parts: color the surface by part
+	part: int = -1
+	color_parts: bool = False
 
 	# level set / field
 	isovalue: float = 0.0

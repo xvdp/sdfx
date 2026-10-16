@@ -4,8 +4,9 @@
 // or a sign change between two samples, refined by bisection (robust to steps that overshoot the surface).
 // Optional clip half-space n·x ≤ c: the ray segment is restricted to it. A ray that enters the solid at the clip
 // plane marches on to the far side of the solid (the cut plane, drawn at the same place, covers that opening).
-// Shading: Blinn-Phong with a head light; front and back faces (seen from inside) get different colors; alpha =
-// u_opacity (the renderer blends passes with u_opacity < 1 without writing depth).
+// Shading: Blinn-Phong with a head light; front and back faces (seen from inside) get different colors, or the color
+// of the part at the hit (u_color_parts); alpha = u_opacity (the renderer blends passes with u_opacity < 1 without
+// writing depth).
 #include "common.glsl"
 #include "camera.glsl"
 #include "field.glsl"
@@ -20,13 +21,25 @@ uniform vec4 u_clip_plane;  // (n, c): keep n·x <= c
 uniform vec3 u_color_front;
 uniform vec3 u_color_back;
 uniform float u_opacity;  // < 1: blended pass (overlay of several models)
+uniform bool u_color_parts;  // color by fieldPart (fields with parts, e.g. a SuperFit assembly)
 
 layout(location = 0) out vec4 frag_color;
+
+// part colors: golden-ratio hues, pastel
+vec3 partColor(int i) {
+    float hue = fract(0.13 + 0.618034 * float(i));
+    vec3 k = clamp(abs(fract(hue + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+    return mix(vec3(1.0), k, 0.55);
+}
 
 vec3 shade(vec3 p, vec3 n, vec3 rd) {
     bool back = dot(n, rd) > 0.0;
     n = back ? -n : n;
     vec3 base = back ? u_color_back : u_color_front;
+    if (u_color_parts) {
+        int part = fieldPart(p);
+        if (part >= 0) base = back ? 0.6 * partColor(part) : partColor(part);
+    }
     vec3 l = normalize(-rd + 0.3 * vec3(0.3, 1.0, 0.2));
     vec3 h = normalize(l - rd);
     float diffuse = max(dot(n, l), 0.0);

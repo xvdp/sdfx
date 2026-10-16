@@ -16,12 +16,14 @@ process=False, then p_n = s (p - c), s = 1.8 / max bounding-box extent, c = boun
   pat  oriented point cloud of --pat-points samples, uniform by area on the normalized mesh with face normals
        (optionally with Gaussian position noise --pat-noise), then PointsAsTori (pre-trained network + torus fit);
        the scene holds its native field (tori + BVH, k = 32), a grid bake of it and the input points;
-  sup  SuperFit's assembly as superfit_sdf.SuperFitSDF (deterministic argmax reduction), baked on a grid; the assembly
-       is given (--assembly / --assembly-dir) or fitted (--fit-superfit);
+  sup  SuperFit's assembly as superfit_sdf.SuperFitSDF (deterministic argmax reduction): generated GLSL (the
+       composition of its primitives and each primitive alone; keys [ ] and U in the viewer) and a grid bake; the
+       assembly is given (--assembly / --assembly-dir) or fitted (--fit-superfit);
   gt   the input mesh's signed distance baked on a grid (--gt: cubvh 'raystab' as SuperFit, or the generalized winding
        number; 'none' = no gt model).
 Output: <out>/<shape>.sdfx, the three scenes merged (sdfview.scene.merge_scenes; fields 'pat.pat', 'pat.pat_grid',
-'sup', 'gt'; point cloud 'pat.pat_points'); the fit times and counts are in the scene meta (python -m sdfview info).
+'sup.sup', 'sup.sup_grid', 'gt'; point cloud 'pat.pat_points'); the fit times and counts are in the scene meta
+(python -m sdfview info).
 
 SuperFit fitting (--fit-superfit) runs ext/superfit/scripts/mesh_to_assembly.py --fastmode with PYTHONPATH=ext/superfit
 (SuperFit itself need not be installed) in --superfit-python, which must have SuperFit's fitting dependencies (its
@@ -343,7 +345,7 @@ def process(name, mesh_path, assembly, a, device, dtype, out_dir):
 		fit_time = float(fit_time) if fit_time is not None else float('nan')
 		print(f'  SUP: {sup.n_primitives} primitives ({sup.program}), fit {fit_time:.1f} s', flush=True)
 		meta = {'input': assembly, 'mesh': mesh_path, 'time_fit': fit_time}
-		scenes['sup'] = scene_from_superfit(sup, resolution=a.res, meta=meta)
+		scenes['sup'] = scene_from_superfit(sup, resolution=a.res, meta=meta, name='sup')  # GLSL + grid bake
 		if ctx is not None:
 			rows.append({**common, 'model': 'SUP', 'assembly': assembly, 'program': sup.program,
 						 'primitives': sup.n_primitives, 'time_fit': fit_time, **model_metrics(sup, gt, ctx)})  # fmt: skip

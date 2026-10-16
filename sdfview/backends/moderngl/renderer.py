@@ -109,6 +109,8 @@ class Renderer:
 			return {'FIELD_PAT': None, 'BVH_STACK_SIZE': max(64, depth + 2), 'BVH_K_MAX': self._k_max(field)}
 		if field['type'] == 'grid':
 			return {'FIELD_GRID': None}
+		if field['type'] == 'glsl':
+			return {'FIELD_GLSL': None}
 		raise ValueError(f'unsupported field type {field["type"]!r}')
 
 	@staticmethod
@@ -119,9 +121,11 @@ class Renderer:
 		defines = dict(self._field_defines(field)) if field is not None else {}
 		defines.update(extra or {})
 		key = (vert, frag, field['name'] if field else None, tuple(sorted(defines.items(), key=str)))
+		prelude = field['glsl']['code'] if field is not None and field['type'] == 'glsl' else None
 		if key not in self._programs:
 			self._programs[key] = self.ctx.program(
-				vertex_shader=glsl_source(vert, 'gl330', defines), fragment_shader=glsl_source(frag, 'gl330', defines)
+				vertex_shader=glsl_source(vert, 'gl330', defines),
+				fragment_shader=glsl_source(frag, 'gl330', defines, prelude),
 			)
 			self._vao[key] = self.ctx.vertex_array(self._programs[key], [])
 		return self._programs[key], self._vao[key]
@@ -146,7 +150,17 @@ class Renderer:
 			_set(prog, 'grid_min', field['bounds']['min'])
 			_set(prog, 'grid_max', field['bounds']['max'])
 			unit += 1
+		elif field['type'] == 'glsl':
+			_set(prog, 'field_part', self.field_part(field, settings))
+			lo, hi = np.asarray(field['bounds']['min'], float), np.asarray(field['bounds']['max'], float)
+			_set(prog, 'field_gradient_step', 5e-4 * float(np.linalg.norm(hi - lo)))
 		return unit
+
+	@staticmethod
+	def field_part(field: dict, settings: ViewSettings) -> int:
+		"""Part shown for a field with parts: settings.part if in range (-2 all parts, i >= 0 part i), else -1."""
+		n = int(field.get('glsl', {}).get('n_parts', 0))
+		return settings.part if -2 <= settings.part < n else -1
 
 	def models(self) -> list:
 		"""Model names of the fields, in field order (a field without a "model" key is its own model)."""
@@ -156,13 +170,19 @@ class Renderer:
 				out.append(model_of(f))
 		return out
 
+	# preference among a model's fields: surfaces are traced with many evaluations per pixel (cheap fields first:
+	# generated GLSL, then grids, then PAT's exact k-NN blend); the cut plane evaluates once per pixel (exact first)
+	SURFACE_ORDER = {'glsl': 0, 'grid': 1}
+	CUT_ORDER = {'grid': 1}
+
+	@classmethod
+	def _preferred(cls, fields: list, for_surface: bool) -> Optional[dict]:
+		rank = cls.SURFACE_ORDER if for_surface else cls.CUT_ORDER
+		return min(fields, key=lambda f: rank.get(f['type'], 2 if for_surface else 0)) if fields else None
+
 	def model_field(self, model: str, for_surface: bool = True) -> Optional[dict]:
-		"""The field drawn for a model: its grid for surfaces (fast to trace), its exact field for the cut plane."""
-		fields = [f for f in self.scene.fields if model_of(f) == model]
-		grids = [f for f in fields if f['type'] == 'grid']
-		exact = [f for f in fields if f['type'] != 'grid']
-		order = (grids + exact) if for_surface else (exact + grids)
-		return order[0] if order else None
+		"""The field drawn for a model: for surfaces its cheapest field to trace, for the cut plane its exact field."""
+		return self._preferred([f for f in self.scene.fields if model_of(f) == model], for_surface)
 
 	def model_color(self, model: str, settings: ViewSettings):
 		if settings.model_colors and model in settings.model_colors:
@@ -178,10 +198,8 @@ class Renderer:
 			if f is None:
 				raise KeyError(f'no field {which!r} in the scene')
 			return f
-		grids = [f for f in self.scene.fields if f['type'] == 'grid']
-		exact = [f for f in self.scene.fields if f['type'] != 'grid']
-		order = (grids + exact) if for_surface else (exact + grids)
-		return order[0] if order else None
+		models = self.models()  # 'auto': the first model's field (its cheapest to trace / its exact one)
+		return self.model_field(models[0], for_surface) if models else None
 
 	# ---- drawing
 
@@ -300,6 +318,7 @@ class Renderer:
 		_set(prog, 'u_color_front', color_front)
 		_set(prog, 'u_color_back', color_back)
 		_set(prog, 'u_opacity', float(opacity))
+		_set(prog, 'u_color_parts', bool(s.color_parts))
 		vao.render(moderngl.TRIANGLES, vertices=3)
 
 	def render(self, camera: OrbitCamera, settings: Optional[ViewSettings] = None, size=(800, 600)) -> np.ndarray:

@@ -21,6 +21,7 @@ HELP = """\
   keys    S surface · C cut plane · P points · X/Y/Z cut axis · ↑/↓ move cut plane (shift: faster)
           K clip surface at the plane · B cut plane opacity · G / F cycle the surface / cut-plane field
           V overlay all models (G picks the opaque one) · T overlay transparency
+          [ / ] parts of an assembly (whole, all parts, part 0, 1, ...) · U color by part
           I / O isovalue ∓ · N / M neighbors k ∓ · 1-4 resolution while dragging (1 = full) · R reset view
           H help · Esc quit"""
 
@@ -140,6 +141,14 @@ class ViewerWindow(mglw.WindowConfig):
 			v.surface_mode = 'single' if v.surface_mode == 'overlay' else 'overlay'
 		elif key == keys.T:
 			v.overlay_opacity = 0.45 if v.overlay_opacity >= 1.0 else 1.0
+		elif key in (keys.LEFT_BRACKET, keys.RIGHT_BRACKET):
+			# cycle -1 (the assembly), -2 (all parts), 0 .. n-1 (one part) over the scene's largest part count
+			n = max([int(f.get('glsl', {}).get('n_parts', 0)) for f in self.renderer.scene.fields] + [0])
+			order = [-1, -2] + list(range(n))
+			i = order.index(v.part) if v.part in order else 0
+			v.part = order[(i + (1 if key == keys.RIGHT_BRACKET else -1)) % len(order)]
+		elif key == keys.U:
+			v.color_parts = not v.color_parts
 		elif key in (keys.I, keys.O):
 			v.isovalue += (-1 if key == keys.I else 1) * 0.005 * self.renderer.diagonal * (5 if modifiers.shift else 1)
 		elif key in (keys.N, keys.M):
@@ -173,6 +182,13 @@ class ViewerWindow(mglw.WindowConfig):
 			f'iso {v.isovalue:+.4f}',
 			f'k {v.k or self._scene_k()}',
 		]
+		assembly = next((f for f in self.scene.fields if f['type'] == 'glsl'), None)
+		if assembly is not None:
+			types = assembly['glsl'].get('part_types', [])
+			shown = {-1: 'whole', -2: 'all parts'}.get(v.part)
+			if shown is None:
+				shown = f'part {v.part}' + (f' {types[v.part]}' if v.part < len(types) else '')
+			parts.append(f'assembly: {shown}{" (colored)" if v.color_parts else ""}')
 		self.wnd.title = 'sdfview — ' + ' · '.join(parts)
 
 

@@ -38,11 +38,18 @@ def _expand(name: str, seen: set) -> str:
 	return _INCLUDE.sub(lambda m: _expand(m.group(1), seen), text)
 
 
-def glsl_source(name: str, target: str = 'gl330', defines: Optional[Dict[str, object]] = None) -> str:
-	"""Complete source of the program stage `name` (e.g. 'surface.frag') for `target`, with `#define`s."""
+def glsl_source(
+	name: str, target: str = 'gl330', defines: Optional[Dict[str, object]] = None, prelude: Optional[str] = None
+) -> str:
+	"""
+	Complete source of the program stage `name` (e.g. 'surface.frag') for `target`, with `#define`s, and `prelude`
+	(e.g. the generated code of a "glsl" field) inserted after them, before the modules.
+	"""
 	if target not in HEADERS:
 		raise ValueError(f'unknown target {target!r} (one of {list(HEADERS)})')
 	lines = [HEADERS[target]]
 	for key, value in (defines or {}).items():
 		lines.append(f'#define {key}' if value is None or value is True else f'#define {key} {value}')
+	if prelude:
+		lines.append(prelude)
 	return '\n'.join(lines) + '\n' + _expand(name, set())

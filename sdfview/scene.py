@@ -43,6 +43,13 @@ FIELD TYPES
 	    arrays: values (D, H, W) float32, values[z, y, x] = φ(min + (x, y, z) / (W-1, H-1, D-1) · (max - min))
 	    params: isovalue;  "bounds": {"min", "max"} of the grid
 	    Any SDF evaluated with torch (PAT, SUP, a mesh SDF, an analytic shape) can be exported this way.
+	"glsl" — the field as generated GLSL source, evaluated by the shader (e.g. a SuperFit assembly, superfit_sdf/glsl.py)
+	    "glsl": {"code": str, "prefix": "assembly", "n_parts": int, "part_types": [str, ...]}; the code defines
+	            float assemblyDistance(vec3 p), float assemblyPartDistance(int i, vec3 p),
+	            float assemblyParts(vec3 p, out int id), int assemblyNearestPart(vec3 p)
+	    params: isovalue;  "bounds": {"min", "max"}: the region the field describes (camera framing)
+	    No arrays. The code is data of the scene (its license is the generator's source's, e.g. SuperFit's for its
+	    primitive modules); viewers insert it before their field module (sdfview/shaders/glsl/field.glsl).
 
 Optional keys of a field or point cloud:
 	"model" — name of the model (fit) it belongs to: fields of one model (e.g. PAT's exact field and its grid bake)
@@ -207,6 +214,21 @@ def grid_field(scene: Scene, name: str, values: np.ndarray, bounds_min, bounds_m
 			'bounds': {'min': [float(x) for x in bounds_min], 'max': [float(x) for x in bounds_max]},
 			'params': {'isovalue': float(isovalue)},
 			'arrays': {'values': f'{name}/values'},
+		}
+	)
+
+
+def glsl_field(scene: Scene, name: str, generated: dict, bounds_min, bounds_max, isovalue: float = 0.0) -> dict:
+	"""Add a "glsl" field from generated code ({'code', 'prefix', 'n_parts', 'part_types'}, prefix 'assembly')."""
+	if generated.get('prefix') != 'assembly':
+		raise ValueError("a scene's glsl field must be generated with prefix 'assembly' (the viewer's entry points)")
+	return scene.add_field(
+		{
+			'name': name,
+			'type': 'glsl',
+			'bounds': {'min': [float(x) for x in bounds_min], 'max': [float(x) for x in bounds_max]},
+			'params': {'isovalue': float(isovalue)},
+			'glsl': {k: generated[k] for k in ('code', 'prefix', 'n_parts', 'part_types')},
 		}
 	)
 

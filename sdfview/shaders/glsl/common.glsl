@@ -5,7 +5,7 @@
 // Same scheme as fetch_texel in ext/points-as-tori/demo/shaders_3d.py, with W read from the texture itself.
 
 const float INFINITY = 1e30;
-const float PI = 3.14159265358979;
+// (no PI here: generated "glsl" field code defines its own, e.g. SuperFit's modules)
 
 ivec2 index_to_texel(int idx, int width) {
     return ivec2(idx % width, idx / width);

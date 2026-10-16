@@ -25,8 +25,10 @@ the `superfit/` package).
 git submodule update --init ext/superfit
 pip install -e ".[superfit]"            # evaluation dependencies only: geolipi, sysl3d, sympy, trimesh (MIT / BSD)
 
-python -m sdfview superfit primitive_assembly.pkl -o assembly.sdfx --bake 192 [--device cuda] [--view]
+python -m sdfview superfit primitive_assembly.pkl -o assembly.sdfx --view [--color-parts]   # generated GLSL
+python -m sdfview superfit primitive_assembly.pkl -o assembly.sdfx --bake 192 [--device cuda]  # + torch grid bake
 python -m sdfview superfit primitive_assembly.pkl -o assembly.sdfx --mesh input.obj   # in the input mesh's frame
+python -m sdfview superfit primitive_assembly.pkl --shadertoy assembly.glsl          # Shadertoy-style code
 ```
 
 ```python
@@ -47,6 +49,56 @@ Fitting runs SuperFit's own script from the submodule, also without installing i
 (writes `out/final_content.pkl`; `experiments/compare_pat_sup.py --fit-superfit` does this per mesh). The Python that
 runs it needs SuperFit's fitting dependencies (its `env.yml` without `-e .`, plus cubvh and kaolin built from source as
 in its README), a CUDA GPU and a watertight input mesh.
+
+## The assembly as GLSL (`glsl.py`): composition and parts
+
+`assembly_glsl(sdf)` writes the reduced assembly as GLSL functions, generated at run time:
+
+```glsl
+float assembly_part<i>(vec3 p)           // primitive i alone: its transforms from the root, then the primitive
+float assemblyDistance(vec3 p)            // the assembly: transforms, primitives, nested smooth unions (bottom-up)
+float assemblyPartDistance(int i, vec3 p) // part i alone
+float assemblyParts(vec3 p, out int id)   // the parts as separate solids: min_i, id = argmin
+int   assemblyNearestPart(vec3 p)         // to color the assembly by part
+const int assembly_PART_COUNT;
+```
+
+with every parameter inlined (float32 literals), e.g.
+
+```glsl
+float assemblyDistance(vec3 p) {
+    vec3 q = assembly_frame(p);
+    vec3 p1 = Translate3D(q, vec3(0.200000003, 0.0, 0.0));
+    vec3 p2 = AxisAngleRotate3D(p1, vec3(0.0, 0.300000012, 0.0));
+    float d3 = SuperFrustumY(p2, vec3(0.600000024, 0.400000006, 0.5), 0.300000012, 0.0, 1.0, 0.100000001, 0.0);
+    ...
+    float d7 = sdfxSmoothUnion(d3, d6, 0.05);
+    ...
+}
+```
+
+- **Sources of the code.** The primitives' functions (`SuperFrustum{X,Y,Z}`, `SuperFrustum`, `SPTaperedOnion`, ...)
+  are SuperFit's (`superfit/shader`, Adobe Research License): importing `superfit.shader` registers them in sysl's
+  shader-module registry (`sysl.shader.shader_module.SMMap`), and `glsl.py` reads them from there with their
+  dependencies and constants. They are copied into the generated text (scenes, `--shadertoy` files), not into this
+  repository; that text is a derivative of SuperFit under its license. The transforms come from sysl (MIT); the
+  composition and the smooth union are written in `glsl.py` (MIT).
+- **Semantics** as SuperFit's torch evaluation (geolipi): `Translate3D(e, t)` = e(p − t); `AxisAngleRotate3D(e, a)` =
+  e(p R(a)) (the zero rotation is dropped: the registry's GLSL would normalize a zero vector, geolipi clamps the angle
+  to 1e-8, i.e. the identity); smooth union h = clamp(½ + (b − a)/(2(k + 1e-9)), 0, 1), d = b(1 − h) + ah − kh(1 − h);
+  `Union` min, `Intersection` max, `Difference` max(a, −b). Other node types raise `NotImplementedError`.
+- **Validation** (`tests/superfit/test_glsl.py`, Mesa llvmpipe): the assembly, each part, all parts and the mesh frame
+  against SuperFit's torch evaluation at 4000 points: max |GLSL − torch| = 2.4e-6 (float32 shader, float64 torch);
+  the generated code inside `surface.frag` compiles as GLSL 3.30 and as GLSL ES 3.00 (WebGL2, glslangValidator); the
+  Shadertoy export compiles and renders.
+- **Viewer.** Scene field type `glsl` (`sdfview/scene.py`): the code is stored in the scene (JSON), the viewer inserts it
+  before its field module. Keys `[` / `]` cycle whole → all parts → part 0, 1, ...; `U` colors by part (`--part`,
+  `--color-parts`). As the field is exact and cheap (one call per primitive), surfaces trace it rather than a bake.
+- **Shadertoy.** `assembly_shadertoy(sdf)` (`--shadertoy FILE`): the functions plus a `mainImage` sphere tracer with
+  `iResolution`, `iTime`, `iMouse`; `#define PART` / `COLOR_PARTS` select what is drawn. Paste into shadertoy.com, or
+  load with `examples/hosts/shadertoy_moderngl.py`.
+- **Upstream.** sysl's `AxisAngleRotate3D` GLSL normalizes the axis-angle vector, undefined for a zero rotation
+  (NaN on most drivers); SuperFit's HTML export goes through it.
 
 ## Assembly file
 
@@ -138,5 +190,5 @@ the metrics describe each fit against the mesh, not one method under the other's
 
 ## Not done yet
 
-- Native GLSL for the assembly in sdfview (SuperFit generates it through sysl; its shader modules are Adobe-licensed,
-  so they would be generated at run time from the user's SuperFit checkout rather than stored here).
+- Primitive families other than the SuperFrustum ones are generated only if their sysl module is a plain code module
+  (template-generated modules raise `NotImplementedError`); tested here: SuperFrustum X / Y / Z.
