@@ -107,9 +107,24 @@ export class OrbitCamera {
 
   zoom(steps) { this.distance *= 0.9 ** steps; }
 
+  // move the target in the view plane by (dx, dy) pixels of a viewport `height` pixels tall
+  pan(dx, dy, height) {
+    const v = this.viewMatrix();  // row-major: rows 0 and 1 hold the camera's right and up axes
+    const right = [v[0], v[1], v[2]], up = [v[4], v[5], v[6]];
+    const k = (2 * this.distance * Math.tan((this.fovY * Math.PI) / 360)) / Math.max(height, 1);
+    this.target = sub(this.target, scale(sub(scale(right, dx), scale(up, dy)), k));
+  }
+
   // uniforms shared by every host's surface program (as Renderer._camera_uniforms in the moderngl backend)
+  // the view direction (eye -> target)
+  direction() { return normalize(sub(this.target, this.eye())); }
+
+  // uniforms shared by every host's programs (as Renderer._camera_uniforms in the moderngl backend)
   uniforms(viewport) {
     const vp = multiply(this.projMatrix(viewport[2] / Math.max(viewport[3], 1)), this.viewMatrix());
-    return { u_view_proj: vp, u_inv_view_proj: invert(vp), u_viewport: viewport };
+    return {
+      u_view_proj: vp, u_inv_view_proj: invert(vp), u_viewport: viewport,
+      u_proj11: 1 / Math.tan((this.fovY * Math.PI) / 360), u_camera_dir: this.direction(),
+    };
   }
 }

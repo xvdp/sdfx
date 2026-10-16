@@ -1,5 +1,5 @@
 // surface.wgsl — sphere tracing of the level set φ = isovalue inside the scene box (WGSL counterpart of
-// fullscreen.vert + surface.frag; the same marching, bisection and shading; no clip plane yet).
+// fullscreen.vert + surface.frag; the same marching, bisection, clip half-space and shading).
 // March t ← t + κ |φ(o + t d)|; a hit is |φ| < ε or a sign change between two samples, refined by bisection.
 #include "common.wgsl"
 #include "camera.wgsl"
@@ -46,8 +46,20 @@ fn fs_main(@builtin(position) frag: vec4f) -> FragOut {
     let rd = ray.rd;
     let tt = intersectAABB(ro, rd, U.u_box_min, U.u_box_max);
     if (!(tt.x <= tt.y && tt.y >= 0.0)) { discard; }
-    let t0 = max(tt.x, 0.0);
-    let t1 = tt.y;
+    var t0 = max(tt.x, 0.0);
+    var t1 = tt.y;
+
+    if (U.u_clip != 0) {
+        let denom = dot(U.u_clip_plane.xyz, rd);
+        let s = U.u_clip_plane.w - dot(U.u_clip_plane.xyz, ro);  // n·(o + t d) <= c  <=>  t denom <= s
+        if (denom > 0.0) {
+            t1 = min(t1, s / denom);
+        } else if (denom < 0.0) {
+            t0 = max(t0, s / denom);
+        } else if (s < 0.0) {
+            discard;
+        }
+    }
     if (t0 >= t1) { discard; }
 
     var t = t0;

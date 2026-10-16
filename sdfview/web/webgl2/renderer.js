@@ -5,15 +5,17 @@
 //                   OES_texture_float_linear (linear filtering of R32F grids; nearest without it)
 //   2. upload       arrayTexture: (n, 4·t) rows -> 2D texture of RGBA32F / RGBA32I texels, 4096 per row (R32I for
 //                   one column); gridTexture: (D, H, W) -> 3D R32F texture (W, H, D)
-//   3. programs     glslSource(fullscreen.vert, surface.frag | probe.frag, field defines, generated code)
-//   4. per frame    camera / field / surface uniforms, one full-screen triangle per surface pass
+//   3. programs     glslSource(fullscreen.vert + surface.frag | probe.frag, cutplane.vert + cutplane.frag,
+//                   points.vert + points.frag; field defines, generated code)
+//   4. per frame    uniforms per draw: opaque surfaces (full-screen triangle), cut plane (triangle strip of 4),
+//                   points (gl.POINTS, sprites), translucent surfaces (blended, no depth write)
 //   render(...)     the same frame into an offscreen RGBA8 target, read back (tests, images)
 //   probe(q)        fieldDistanceGradient at query points: render probe.frag into an RGBA32F target, read back
 //
 //   const r = await createRenderer(canvas, scene);  r.draw(camera, settings, [0, 0, w, h]);  await r.probe(q, 'pat')
 
 import { fetchReader, fieldDefines, glslSource } from '../core/shaders.js';
-import { boxOf, diagonal, fieldPart, resolveField, surfacePasses } from '../core/view.js';
+import { boxOf, cutUniforms, diagonal, fieldPart, pointClouds, resolveField, surfacePasses } from '../core/view.js';
 import { columnMajor } from '../core/camera.js';
 
 export const TEXTURE_WIDTH = 4096;
@@ -109,8 +111,11 @@ export async function createRenderer(canvas, scene, { read = fetchReader(SHADERS
       textures[`${f.name}/values`] = gridTexture(gl, arrays('values'), floatLinear);
     }
   }
+  for (const pc of pointClouds(scene)) {  // point clouds: textures by array name (shared with a field's points)
+    for (const name of [pc.positions, pc.normals]) if (name && !textures[name]) textures[name] = arrayTexture(gl, scene.arrays[name]);
+  }
   const box = boxOf(scene);
-  const vao = gl.createVertexArray();
+  const vao = gl.createVertexArray();  // no attributes: every program fetches its data by gl_VertexID
 
   // 3. programs, compiled once per (stage files, field, defines)
   const programs = new Map();
@@ -125,8 +130,13 @@ export async function createRenderer(canvas, scene, { read = fetchReader(SHADERS
     }
     return programs.get(key);
   }
-  // compile the surface programs now (draw() is synchronous)
-  for (const f of scene.manifest.fields) if (SUPPORTED.includes(f.type)) await program('fullscreen.vert', 'surface.frag', f);
+  // compile the programs draw() uses now (draw() is synchronous)
+  for (const f of scene.manifest.fields) {
+    if (!SUPPORTED.includes(f.type)) continue;
+    await program('fullscreen.vert', 'surface.frag', f);
+    await program('cutplane.vert', 'cutplane.frag', f);
+  }
+  if (pointClouds(scene).length) await program('points.vert', 'points.frag', null);
 
   function bindField(prog, field, s, unit = 0) {
     const p = field.params || {};
@@ -156,7 +166,7 @@ export async function createRenderer(canvas, scene, { read = fetchReader(SHADERS
   }
 
   // 4. per frame
-  function drawSurface(pass, s, cam, eps) {
+  function drawSurface(pass, s, cam, cut, eps) {
     const prog = programs.get(`fullscreen.vert|surface.frag|${pass.field.name}`);
     gl.useProgram(prog);
     bindField(prog, pass.field, s);
@@ -166,8 +176,8 @@ export async function createRenderer(canvas, scene, { read = fetchReader(SHADERS
     setUniform(gl, prog, 'u_max_steps', s.maxSteps);
     setUniform(gl, prog, 'u_epsilon', eps);
     setUniform(gl, prog, 'u_step_scale', s.stepScale);
-    setUniform(gl, prog, 'u_clip', false);
-    setUniform(gl, prog, 'u_clip_plane', [0, 0, 1, 0]);
+    setUniform(gl, prog, 'u_clip', cut.u_clip);
+    setUniform(gl, prog, 'u_clip_plane', cut.u_clip_plane);
     setUniform(gl, prog, 'u_color_front', pass.front);
     setUniform(gl, prog, 'u_color_back', pass.back);
     setUniform(gl, prog, 'u_opacity', pass.opacity);
@@ -185,15 +195,55 @@ export async function createRenderer(canvas, scene, { read = fetchReader(SHADERS
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LESS);
     const cam = camera.uniforms(viewport);
+    const cut = cutUniforms(s, box);
     const eps = s.epsilon ?? 1e-4 * diagonal(box);
     const passes = surfacePasses(scene, s, SUPPORTED);
-    for (const p of passes) if (p.opacity >= 1) drawSurface(p, s, cam, eps);
+    for (const p of passes) if (p.opacity >= 1) drawSurface(p, s, cam, cut, eps);
+
+    const cutField = s.showCutplane ? resolveField(scene, s.cutField, false, SUPPORTED) : null;
+    if (cutField) {
+      const prog = programs.get(`cutplane.vert|cutplane.frag|${cutField.name}`);
+      gl.useProgram(prog);
+      bindField(prog, cutField, s);
+      for (const [k, v] of Object.entries({ ...cam, ...cut })) setUniform(gl, prog, k, v);
+      setUniform(gl, prog, 'u_box_min', box[0]);
+      setUniform(gl, prog, 'u_box_max', box[1]);
+      if (s.cutOpacity < 1) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      }
+      gl.bindVertexArray(vao);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.disable(gl.BLEND);
+    }
+
+    if (s.showPoints) {
+      for (const pc of pointClouds(scene)) {
+        const prog = programs.get('points.vert|points.frag|');
+        gl.useProgram(prog);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, textures[pc.positions]);
+        setUniform(gl, prog, 'u_positions', 0);
+        if (pc.normals) {
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, textures[pc.normals]);
+          setUniform(gl, prog, 'u_normals', 1);
+        }
+        setUniform(gl, prog, 'u_has_normals', !!pc.normals);
+        for (const [k, v] of Object.entries(cam)) setUniform(gl, prog, k, v);
+        setUniform(gl, prog, 'u_point_radius', s.pointRadius ?? pc.radius ?? 0.005);
+        setUniform(gl, prog, 'u_point_color', s.pointColor);
+        gl.bindVertexArray(vao);
+        gl.drawArrays(gl.POINTS, 0, scene.arrays[pc.positions].shape[0]);
+      }
+    }
+
     const translucent = passes.filter((p) => p.opacity < 1);
-    if (translucent.length) {  // blended over the opaque ones, without writing depth
+    if (translucent.length) {  // blended over everything drawn so far, without writing depth
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       gl.depthMask(false);
-      for (const p of translucent) drawSurface(p, s, cam, eps);
+      for (const p of translucent) drawSurface(p, s, cam, cut, eps);
       gl.depthMask(true);
       gl.disable(gl.BLEND);
     }

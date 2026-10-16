@@ -4,9 +4,11 @@
 //   1. device       navigator.gpu.requestAdapter() / requestDevice(); canvas context configured with the device
 //   2. upload       PAT arrays -> storage buffers (the scene rows as stored: no 2D texel layout), grid -> r32float 3D
 //                   texture (trilinear in the shader: textureLoad, exact weights)
-//   3. pipelines    wgslSource('surface.wgsl' | 'probe.wgsl', field defines) -> render / compute pipelines (layout
-//                   'auto'); bind groups: 0 uniform block (common.wgsl Uniforms), 1 field data, 2 probe buffers
-//   4. per frame    uniforms written per surface pass, one render pass, one full-screen triangle per surface
+//   3. pipelines    wgslSource('surface.wgsl' | 'cutplane.wgsl' | 'points.wgsl' | 'probe.wgsl', field defines) ->
+//                   render / compute pipelines (layout 'auto'); bind groups: 0 uniform block (common.wgsl Uniforms),
+//                   1 field data (points: positions, normals), 2 probe buffers
+//   4. per frame    one uniform buffer per draw, one render pass: opaque surfaces (full-screen triangle), cut plane
+//                   (triangle strip of 4), points (instanced quads: WebGPU points are 1 pixel), translucent surfaces
 //   render(...)     the same frame offscreen, read back as RGBA8 (tests, images)
 //   probe(q)        compute shader, one invocation per query, results read back from a mapped buffer
 //
@@ -14,7 +16,7 @@
 
 import { columnMajor } from '../core/camera.js';
 import { fetchReader, fieldDefines, wgslSource } from '../core/shaders.js';
-import { boxOf, defaultSettings, diagonal, resolveField, surfacePasses } from '../core/view.js';
+import { boxOf, cutUniforms, defaultSettings, diagonal, pointClouds, resolveField, surfacePasses } from '../core/view.js';
 
 const SUPPORTED = ['pat', 'grid'];
 const SHADERS = new URL('../../shaders/', import.meta.url);
@@ -26,8 +28,12 @@ export const UNIFORMS = {
   u_color_front: [176, 'vec3'], u_step_scale: [188, 'f32'], u_color_back: [192, 'vec3'], u_opacity: [204, 'f32'],
   grid_min: [208, 'vec3'], field_isovalue: [220, 'f32'], grid_max: [224, 'vec3'], pat_k: [236, 'i32'],
   pat_lambda_scale: [240, 'f32'], pat_max_exp_arg: [244, 'f32'], u_count: [248, 'i32'], u_color_parts: [252, 'i32'],
+  u_clip_plane: [256, 'vec4'], u_plane_origin: [272, 'vec3'], u_clip: [284, 'i32'], u_plane_u: [288, 'vec3'],
+  u_colormap_range: [300, 'f32'], u_plane_v: [304, 'vec3'], u_isoband_frequency: [316, 'f32'],
+  u_camera_dir: [320, 'vec3'], u_point_radius: [332, 'f32'], u_point_color: [336, 'vec3'], u_proj11: [348, 'f32'],
+  u_has_normals: [352, 'i32'],
 };
-const UNIFORM_BYTES = 256;
+const UNIFORM_BYTES = 368;
 
 export function packUniforms(values) {
   const buf = new ArrayBuffer(UNIFORM_BYTES);
@@ -74,14 +80,18 @@ export async function createRenderer(canvas, scene, { read = fetchReader(SHADERS
       resources[f.name] = [tex.createView()];
     }
   }
+  const clouds = pointClouds(scene).map((pc) => {
+    const normals = pc.normals ? storage(scene.arrays[pc.normals]) : storage({ data: new Float32Array(4) });
+    return { pc, buffers: [storage(scene.arrays[pc.positions]), normals], count: scene.arrays[pc.positions].shape[0] };
+  });
   const box = boxOf(scene);
 
-  // 3. pipelines (per field; opaque and translucent variants of the surface)
+  // 3. pipelines (per field; opaque and translucent variants of the surface and the cut plane)
   const modules = new Map();
-  async function shaderModule(program, field) {
-    const key = `${program}|${field.name}`;
+  async function shaderModule(program, field = null) {
+    const key = `${program}|${field ? field.name : ''}`;
     if (!modules.has(key)) {
-      const code = await wgslSource(read, program, fieldDefines(field));
+      const code = await wgslSource(read, program, field ? fieldDefines(field) : {});
       const module = device.createShaderModule({ code, label: key });
       const info = await module.getCompilationInfo();
       const errors = info.messages.filter((m) => m.type === 'error');
@@ -93,27 +103,33 @@ export async function createRenderer(canvas, scene, { read = fetchReader(SHADERS
     }
     return modules.get(key);
   }
-  const surfacePipelines = new Map();
-  async function surfacePipeline(field, translucent, colorFormat) {
-    const key = `${field.name}|${translucent}|${colorFormat}`;
-    if (!surfacePipelines.has(key)) {
-      const module = await shaderModule('surface.wgsl', field);
-      const blend = translucent
-        ? { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } }
-        : undefined;
-      surfacePipelines.set(key, await device.createRenderPipelineAsync({
+  // blending as GL's (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) on every channel; translucent draws do not write depth
+  const BLEND = { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
+                  alpha: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' } };
+  const pipelines = new Map();  // `${program}|${field}|${translucent}|${format}`
+  async function pipeline(program, field, translucent, colorFormat, topology) {
+    const key = `${program}|${field ? field.name : ''}|${translucent}|${colorFormat}`;
+    if (!pipelines.has(key)) {
+      const module = await shaderModule(program, field);
+      pipelines.set(key, await device.createRenderPipelineAsync({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs_main' },
-        fragment: { module, entryPoint: 'fs_main', targets: [{ format: colorFormat, blend }] },
-        primitive: { topology: 'triangle-list' },
+        fragment: { module, entryPoint: 'fs_main', targets: [{ format: colorFormat, blend: translucent ? BLEND : undefined }] },
+        primitive: { topology },
         depthStencil: { format: 'depth24plus', depthWriteEnabled: !translucent, depthCompare: 'less' },
       }));
     }
-    return surfacePipelines.get(key);
+    return pipelines.get(key);
   }
-  for (const f of scene.manifest.fields) {  // draw() records synchronously: build the pipelines now
-    if (!SUPPORTED.includes(f.type)) continue;
-    for (const fmt of [format, 'rgba8unorm']) for (const tr of [false, true]) await surfacePipeline(f, tr, fmt);
+  for (const fmt of [format, 'rgba8unorm']) {  // draw() records synchronously: build the pipelines now
+    for (const f of scene.manifest.fields) {
+      if (!SUPPORTED.includes(f.type)) continue;
+      for (const tr of [false, true]) {
+        await pipeline('surface.wgsl', f, tr, fmt, 'triangle-list');
+        await pipeline('cutplane.wgsl', f, tr, fmt, 'triangle-strip');
+      }
+    }
+    if (clouds.length) await pipeline('points.wgsl', null, false, fmt, 'triangle-list');
   }
 
   function fieldUniforms(field, s) {
@@ -130,12 +146,13 @@ export async function createRenderer(canvas, scene, { read = fetchReader(SHADERS
     return u;
   }
 
-  function fieldBindGroup(pipeline, field) {
+  function bindGroup(pipe, group, resourceList) {
     return device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(1),
-      entries: resources[field.name].map((r, binding) => ({ binding, resource: r instanceof GPUBuffer ? { buffer: r } : r })),
+      layout: pipe.getBindGroupLayout(group),
+      entries: resourceList.map((r, binding) => ({ binding, resource: r instanceof GPUBuffer ? { buffer: r } : r })),
     });
   }
+  const fieldBindGroup = (pipe, field) => bindGroup(pipe, 1, resources[field.name]);
 
   // 4. per frame
   let depth = null;
@@ -151,24 +168,51 @@ export async function createRenderer(canvas, scene, { read = fetchReader(SHADERS
     });
     pass.setViewport(...viewport, 0, 1);
     const cam = camera.uniforms(viewport);
+    const cut = cutUniforms(s, box);
     const eps = s.epsilon ?? 1e-4 * diagonal(box);
-    const passes = surfacePasses(scene, s, SUPPORTED);
-    const ordered = [...passes.filter((p) => p.opacity >= 1), ...passes.filter((p) => p.opacity < 1)];
     const transient = [];
-    for (const p of ordered) {
-      const pipeline = surfacePipelines.get(`${p.field.name}|${p.opacity < 1}|${colorFormat}`);
+    // one uniform buffer per draw (queue.writeBuffer lands before the pass runs: a shared buffer would hold the last)
+    const uniforms = (pipe, values) => {
       const ubuf = device.createBuffer({ size: UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       transient.push(ubuf);
-      device.queue.writeBuffer(ubuf, 0, packUniforms({
+      device.queue.writeBuffer(ubuf, 0, packUniforms(values));
+      pass.setBindGroup(0, bindGroup(pipe, 0, [ubuf]));
+    };
+    const surface = (p) => {
+      const pipe = pipelines.get(`surface.wgsl|${p.field.name}|${p.opacity < 1}|${colorFormat}`);
+      pass.setPipeline(pipe);
+      uniforms(pipe, {
         ...cam, ...fieldUniforms(p.field, s), u_box_min: box[0], u_box_max: box[1], u_max_steps: s.maxSteps,
-        u_epsilon: eps, u_step_scale: s.stepScale, u_color_front: p.front, u_color_back: p.back,
-        u_opacity: p.opacity, u_color_parts: s.colorParts,
-      }));
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubuf } }] }));
-      pass.setBindGroup(1, fieldBindGroup(pipeline, p.field));
+        u_epsilon: eps, u_step_scale: s.stepScale, u_clip: cut.u_clip, u_clip_plane: cut.u_clip_plane,
+        u_color_front: p.front, u_color_back: p.back, u_opacity: p.opacity, u_color_parts: s.colorParts,
+      });
+      pass.setBindGroup(1, fieldBindGroup(pipe, p.field));
       pass.draw(3);
+    };
+    const passes = surfacePasses(scene, s, SUPPORTED);
+    for (const p of passes) if (p.opacity >= 1) surface(p);
+
+    const cutField = s.showCutplane ? resolveField(scene, s.cutField, false, SUPPORTED) : null;
+    if (cutField) {
+      const pipe = pipelines.get(`cutplane.wgsl|${cutField.name}|${s.cutOpacity < 1}|${colorFormat}`);
+      pass.setPipeline(pipe);
+      uniforms(pipe, { ...cam, ...fieldUniforms(cutField, s), ...cut, u_box_min: box[0], u_box_max: box[1] });
+      pass.setBindGroup(1, fieldBindGroup(pipe, cutField));
+      pass.draw(4);
     }
+
+    if (s.showPoints) {
+      for (const { pc, buffers, count } of clouds) {
+        const pipe = pipelines.get(`points.wgsl||false|${colorFormat}`);
+        pass.setPipeline(pipe);
+        uniforms(pipe, { ...cam, u_point_radius: s.pointRadius ?? pc.radius ?? 0.005, u_point_color: s.pointColor,
+                         u_has_normals: !!pc.normals });
+        pass.setBindGroup(1, bindGroup(pipe, 1, buffers));
+        pass.draw(6, count);
+      }
+    }
+
+    for (const p of passes) if (p.opacity < 1) surface(p);  // blended over everything, without writing depth
     pass.end();
     return [encoder, transient];
   }
@@ -233,6 +277,7 @@ export async function createRenderer(canvas, scene, { read = fetchReader(SHADERS
 
   function release() {
     for (const rs of Object.values(resources)) for (const r of rs) if (r instanceof GPUBuffer) r.destroy();
+    for (const { buffers } of clouds) for (const b of buffers) b.destroy();
     depth?.destroy();
     device.destroy();
   }

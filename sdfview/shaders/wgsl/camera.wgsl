@@ -24,6 +24,12 @@ fn fragDepth(p: vec3f) -> f32 {
     return clamp(0.5 * clip.z / clip.w + 0.5, 0.0, 1.0);
 }
 
+// Clip coordinates of the OpenGL-style matrices (z in [-w, w]) -> WebGPU's (z in [0, w]): window depth ½ z_ndc + ½,
+// the value fragDepth writes for traced surfaces, so rasterized geometry (cut plane, points) and surfaces compare.
+fn glToWebGPUClip(clip: vec4f) -> vec4f {
+    return vec4f(clip.xy, 0.5 * (clip.z + clip.w), clip.w);
+}
+
 // slab test: (t_near, t_far); the ray (line) meets the box when t_near <= t_far and t_far >= 0
 fn intersectAABB(ro: vec3f, rd: vec3f, aabb_min: vec3f, aabb_max: vec3f) -> vec2f {
     let inv_dir = 1.0 / rd;

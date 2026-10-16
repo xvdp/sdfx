@@ -1,30 +1,34 @@
 // three/webgpu_renderer.js — three.js host, WebGPURenderer: the field written in TSL (three.js' shading language,
 // JavaScript building a node graph that three.js compiles to WGSL, or to GLSL on its WebGL2 fallback backend). The
-// GLSL / WGSL modules are not used: WebGPURenderer takes node materials, not ShaderMaterials (three r186), and native
-// code enters only as single functions (wgslFn / glslFn), without the module-level storage bindings field_pat needs.
-//
-// Chromium 141 (Dawn): three's slice-by-slice upload of the 3D grid fails validation unless Dawn's lazy clear is off
-// (--disable-dawn-features=lazy_clear_resource_on_first_use, as web/test/run_probe.mjs launches it); see the note there.
+// GLSL / WGSL modules are not used: WebGPURenderer takes node materials, not ShaderMaterials (three r186); native code
+// enters as single functions (wgslFn / glslFn).
 //
 // Field types: 'grid' (gridSample / gridDistance / gridDistanceGradient: the functions of field_grid.glsl, in TSL).
 // 'pat' and 'glsl' are not ported to TSL; their grid bakes are drawn instead.
 //
+// Chromium 141 (Dawn): three's slice-by-slice upload of the 3D grid fails validation unless Dawn's lazy clear is off
+// (--disable-dawn-features=lazy_clear_resource_on_first_use, as web/test/run_probe.mjs launches it); see the note there.
+//
 //   1. context      new THREE.WebGPURenderer({ canvas, forceWebGL }); await renderer.init()
-//   2. upload       Data3DTexture (r32float, sampled with texture3DLoad: exact trilinear, as the WGSL host)
-//   3. programs     NodeMaterial.fragmentNode = surface(); QuadMesh draws it; compute for probes
-//   4. per frame    uniform nodes' values, quad.render(renderer)
+//   2. upload       Data3DTexture (r32float, sampled with texture3DLoad: exact trilinear, as the WGSL host);
+//                   point clouds as instanced attributes
+//   3. programs     NodeMaterials: surface (fragmentNode, writes depth) on a QuadMesh per field and opacity; cut plane
+//                   and points (vertexNode: our matrices, not three.js' camera); compute for probes
+//   4. per frame    uniform nodes' values; opaque surfaces, cut plane, points, translucent surfaces (one render call
+//                   each, no clear in between: they share the depth buffer)
 
 import * as THREE from 'three/webgpu';
 import {
-  Break, Discard, Fn, If, Loop, abs, clamp, dot, float, floor, instanceIndex, instancedArray, int, ivec3, length,
-  max, min, mix, normalize, pow, screenUV, texture3DLoad, uniform, vec2, vec3, vec4,
+  Break, Discard, Fn, If, Loop, abs, clamp, depth, dot, float, floor, fwidth, instanceIndex, instancedArray,
+  instancedBufferAttribute, int, ivec3, length, max, min, mix, normalize, positionGeometry, pow, screenUV, select, sin,
+  smoothstep, step, texture3DLoad, uniform, varying, vec2, vec3, vec4,
 } from 'three/tsl';
 import { columnMajor } from '../core/camera.js';
-import { boxOf, defaultSettings, diagonal, resolveField, surfacePasses } from '../core/view.js';
+import { boxOf, cutUniforms, defaultSettings, diagonal, pointClouds, resolveField, surfacePasses } from '../core/view.js';
 
 const SUPPORTED = ['grid'];
 
-// three r186 passes `swizzle: 'rgba'` in every GPUTextureViewDescriptor (the current spec: a string, default 'rgba',
+// three r186 sets `swizzle: 'rgba'` in every GPUTextureViewDescriptor (the current spec: a string, default 'rgba',
 // the identity). Chromium <= 141 typed that member as a dictionary and rejects the string (TypeError in createView).
 // Where the browser rejects it, drop the member when it is the identity: no change in meaning, the default applies.
 function viewSwizzleCompat(device) {
@@ -73,21 +77,53 @@ function gridFunctions(tex, res, gridMin, gridMax) {
   return { gridSample, gridDistance, gridDistanceGradient };
 }
 
+// colormap.glsl in TSL (formulas there): colormap over [-range, range], isobands, zero contour ~1.5 px wide
+const segment = (e0, e1, x) => step(e0, x).mul(float(1.0).sub(step(e1, x)));
+const colormapPasadenaBlue = (t) => mix(vec3(1.0), vec3(0.0627451, 0.517647, 0.94902), pow(t, 7.0));
+const colormapGrapefruit = (t) => mix(vec3(1.0), vec3(0.992157, 0.431373, 0.337255), t);
+const colormapSDF = (t) => colormapPasadenaBlue(t.mul(2.0)).mul(segment(0.0, 0.5, t))
+  .add(colormapGrapefruit(t.sub(0.5).mul(2.0)).mul(segment(0.5, 1.0, t)));
+const redistributeRgb = (c) => {
+  const m = max(max(c.x, c.y), c.z);
+  const total = c.x.add(c.y).add(c.z);
+  const x = float(3.0).sub(total).div(m.mul(3.0).sub(total));
+  const spread = vec3(float(1.0).sub(x.mul(m))).add(c.mul(x));
+  return select(m.lessThanEqual(1.0), c, select(total.greaterThanEqual(3.0), vec3(1.0), spread));
+};
+// fw = fwidth(φ), taken by the caller before any discard (derivatives need uniform control flow)
+const sdfColor = (phi, fw, range, freq) => {
+  const dark = float(0.9).mul(float(1.0).sub(smoothstep(-0.01, 0.01, sin(phi.mul(freq).negate())).mul(0.1)));
+  const col = redistributeRgb(colormapSDF(phi.add(range).div(range.mul(2.0))).mul(dark));
+  const line = float(1.0).sub(smoothstep(0.5, 1.5, abs(phi).div(max(fw, 1e-12))));
+  return mix(col, vec3(0.1), line);
+};
+
 export async function createRenderer(canvas, scene, { forceWebGL = false } = {}) {
   const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, forceWebGL });
   await renderer.init();
   if (!forceWebGL && !GPUTexture.prototype.createView.sdfxCompat) viewSwizzleCompat(renderer.backend.device);
   renderer.autoClear = false;
+  const webgpuClip = renderer.backend.isWebGPUBackend === true;  // clip z in [0, w] (WebGPU) or [-w, w] (WebGL)
   const box = boxOf(scene);
 
-  // uniforms shared by the surface programs (names as in the GLSL / WGSL)
+  // uniforms shared by the programs (names as in the GLSL / WGSL)
   const U = {
-    u_inv_view_proj: uniform(new THREE.Matrix4()), u_box_min: uniform(new THREE.Vector3(...box[0])),
-    u_box_max: uniform(new THREE.Vector3(...box[1])), u_epsilon: uniform(1e-4 * diagonal(box)),
-    u_step_scale: uniform(0.9), u_color_front: uniform(new THREE.Vector3()), u_color_back: uniform(new THREE.Vector3()),
+    u_view_proj: uniform(new THREE.Matrix4()), u_inv_view_proj: uniform(new THREE.Matrix4()),
+    u_viewport: uniform(new THREE.Vector4()), u_proj11: uniform(1.0), u_camera_dir: uniform(new THREE.Vector3()),
+    u_box_min: uniform(new THREE.Vector3(...box[0])), u_box_max: uniform(new THREE.Vector3(...box[1])),
+    u_epsilon: uniform(1e-4 * diagonal(box)), u_step_scale: uniform(0.9), u_clip: uniform(0), u_clip_plane: uniform(new THREE.Vector4()),
+    u_color_front: uniform(new THREE.Vector3()), u_color_back: uniform(new THREE.Vector3()), u_opacity: uniform(1.0),
     field_isovalue: uniform(0.0),
+    u_plane_origin: uniform(new THREE.Vector3()), u_plane_u: uniform(new THREE.Vector3()), u_plane_v: uniform(new THREE.Vector3()),
+    u_colormap_range: uniform(1.0), u_isoband_frequency: uniform(60.0), u_cut_opacity: uniform(1.0),
+    u_point_radius: uniform(0.005), u_point_color: uniform(new THREE.Vector3()),
   };
   const MAX_STEPS = 128;  // a loop bound fixed at build time here (the GLSL / WGSL read u_max_steps)
+  const fragDepth = (p) => {  // camera.glsl fragDepth: ½ z_ndc + ½
+    const clip = U.u_view_proj.mul(vec4(p, 1.0));
+    return clamp(clip.z.div(clip.w).mul(0.5).add(0.5), 0.0, 1.0);
+  };
+  const toClip = (clip) => (webgpuClip ? vec4(clip.xy, clip.z.add(clip.w).mul(0.5), clip.w) : clip);
 
   const fields = {};
   for (const f of scene.manifest.fields) {
@@ -104,10 +140,12 @@ export async function createRenderer(canvas, scene, { forceWebGL = false } = {})
     fields[f.name] = { field: f, tex, ...fn };
   }
 
-  // surface.frag in TSL: sphere tracing with bisection on a sign change, Blinn-Phong head light
-  function surfaceMaterial(F) {
+  // surface.frag in TSL: clip half-space, sphere tracing with bisection on a sign change, Blinn-Phong head light, depth
+  function surfaceMaterial(F, translucent) {
     const fieldDistance = (p) => F.gridDistance(p).sub(U.field_isovalue);
     const material = new THREE.NodeMaterial();
+    material.transparent = translucent;
+    material.depthWrite = !translucent;
     material.fragmentNode = Fn(() => {
       const ndc = vec2(screenUV.x.mul(2.0).sub(1.0), float(1.0).sub(screenUV.y.mul(2.0)));  // screenUV: origin top left
       const near = U.u_inv_view_proj.mul(vec4(ndc, -1.0, 1.0));
@@ -117,8 +155,15 @@ export async function createRenderer(canvas, scene, { forceWebGL = false } = {})
       const inv = vec3(1.0).div(rd);
       const ta = U.u_box_min.sub(ro).mul(inv), tb = U.u_box_max.sub(ro).mul(inv);
       const tmin = min(ta, tb), tmax = max(ta, tb);
-      const t0 = max(max(max(tmin.x, tmin.y), tmin.z), 0.0);
-      const t1 = min(min(tmax.x, tmax.y), tmax.z);
+      const t0 = float(max(max(max(tmin.x, tmin.y), tmin.z), 0.0)).toVar();
+      const t1 = float(min(min(tmax.x, tmax.y), tmax.z)).toVar();
+      If(U.u_clip.equal(1), () => {  // keep n·x <= c:  t denom <= s
+        const denom = dot(U.u_clip_plane.xyz, rd);
+        const s = U.u_clip_plane.w.sub(dot(U.u_clip_plane.xyz, ro));
+        If(denom.greaterThan(0.0), () => { t1.assign(min(t1, s.div(denom))); })
+          .ElseIf(denom.lessThan(0.0), () => { t0.assign(max(t0, s.div(denom))); })
+          .ElseIf(s.lessThan(0.0), () => { Discard(); });
+      });
       If(t0.greaterThanEqual(t1), () => { Discard(); });
       const t = float(t0).toVar();
       const d = float(fieldDistance(ro.add(rd.mul(t)))).toVar();
@@ -142,7 +187,10 @@ export async function createRenderer(canvas, scene, { forceWebGL = false } = {})
         });
       });
       If(hit.lessThan(0.5), () => { Discard(); });
-      const p = ro.add(rd.mul(t));
+      const p = ro.add(rd.mul(t)).toVar();
+      // gl_FragDepth / @builtin(frag_depth); r186's depth.assign returns a node without adding it to the shader's
+      // statements: toStack() does
+      depth.assign(fragDepth(p)).toStack();
       const n0 = normalize(F.gridDistanceGradient(p).yzw);
       const back = dot(n0, rd).greaterThan(0.0);
       const n = back.select(n0.negate(), n0);
@@ -151,26 +199,125 @@ export async function createRenderer(canvas, scene, { forceWebGL = false } = {})
       const hv = normalize(l.sub(rd));
       const diffuse = max(dot(n, l), 0.0);
       const specular = pow(max(dot(n, hv), 0.0), 48.0);
-      return vec4(base.mul(diffuse.mul(0.8).add(0.2)).add(specular.mul(0.25)), 1.0);
+      return vec4(base.mul(diffuse.mul(0.8).add(0.2)).add(specular.mul(0.25)), U.u_opacity);
     })();
     return material;
   }
   const quads = {};
-  for (const [name, F] of Object.entries(fields)) quads[name] = new THREE.QuadMesh(surfaceMaterial(F));
+  for (const [name, F] of Object.entries(fields)) {
+    for (const tr of [false, true]) quads[`${name}|${tr}`] = new THREE.QuadMesh(surfaceMaterial(F, tr));
+  }
+
+  // cutplane.vert + cutplane.frag in TSL: rectangle origin ± u ± v (4 vertices, 2 triangles), colormap of φ
+  function cutPlaneMesh(F) {
+    const material = new THREE.NodeMaterial();
+    material.side = THREE.DoubleSide;  // three.js culls back faces by default; the GL hosts cull nothing
+    const corner = positionGeometry.xy;  // (±1, ±1)
+    const world = varying(U.u_plane_origin.add(U.u_plane_u.mul(corner.x)).add(U.u_plane_v.mul(corner.y)));
+    material.vertexNode = toClip(U.u_view_proj.mul(vec4(world, 1.0)));
+    material.fragmentNode = Fn(() => {
+      const phi = F.gridDistance(world).sub(U.field_isovalue).toVar();
+      const fw = fwidth(phi).toVar();  // before the discard
+      const slack = U.u_box_max.sub(U.u_box_min).mul(1e-4);
+      const lo = U.u_box_min.sub(slack), hi = U.u_box_max.add(slack);
+      If(world.x.lessThan(lo.x).or(world.y.lessThan(lo.y)).or(world.z.lessThan(lo.z))
+        .or(world.x.greaterThan(hi.x)).or(world.y.greaterThan(hi.y)).or(world.z.greaterThan(hi.z)), () => { Discard(); });
+      return vec4(sdfColor(phi, fw, U.u_colormap_range, U.u_isoband_frequency), U.u_cut_opacity);
+    })();
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 1, -1, 0, -1, 1, 0, 1, 1, 0]), 3));
+    g.setIndex([0, 1, 2, 2, 1, 3]);
+    const mesh = new THREE.Mesh(g, material);
+    mesh.frustumCulled = false;
+    return mesh;
+  }
+  const cutMeshes = {};
+  for (const [name, F] of Object.entries(fields)) cutMeshes[name] = cutPlaneMesh(F);
+  const sceneOf = (mesh) => new THREE.Scene().add(mesh);  // renderer.render takes a scene root
+
+  // points.vert + points.frag in TSL: one instanced quad per point (WebGPU points are 1 pixel), diameter
+  // 2 r P[1][1] (h / 2) / w_clip pixels clamped to [1, 64]
+  function pointsMesh(pc) {
+    const positions = scene.arrays[pc.positions];
+    const n = positions.shape[0];
+    const pos = instancedBufferAttribute(new THREE.InstancedBufferAttribute(positions.data, 4));
+    const nrm = pc.normals ? instancedBufferAttribute(new THREE.InstancedBufferAttribute(scene.arrays[pc.normals].data, 4)) : vec4(0.0);
+    const material = new THREE.NodeMaterial();
+    material.side = THREE.DoubleSide;
+    const corner = positionGeometry.xy;
+    material.vertexNode = Fn(() => {
+      const clip = U.u_view_proj.mul(vec4(pos.xyz, 1.0)).toVar();
+      const size = clamp(U.u_point_radius.mul(U.u_proj11).mul(U.u_viewport.w).div(clip.w), 1.0, 64.0);
+      return toClip(vec4(clip.xy.add(corner.mul(size).div(U.u_viewport.zw).mul(clip.w)), clip.z, clip.w));
+    })();
+    const c = varying(corner), normal = varying(nrm.xyz), outlier = varying(pos.w);
+    material.fragmentNode = Fn(() => {
+      const r2 = dot(c, c);
+      If(r2.greaterThan(1.0), () => { Discard(); });
+      const col = select(outlier.greaterThan(0.5), vec3(0.85, 0.1, 0.1), U.u_point_color).toVar();
+      const shade = float(1.0).sub(r2.mul(0.35)).toVar();
+      if (pc.normals) {
+        const nd = dot(normalize(normal), U.u_camera_dir.negate());
+        col.assign(select(nd.greaterThanEqual(0.0), col, mix(col, vec3(0.55), 0.6)));
+        shade.mulAssign(abs(nd).mul(0.55).add(0.45));
+      }
+      return vec4(col.mul(shade), 1.0);
+    })();
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([-1, -1, 0, 1, -1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1, 1, 0]), 3));
+    const mesh = new THREE.Mesh(g, material);
+    mesh.count = n;  // instances (WebGPURenderer)
+    mesh.frustumCulled = false;
+    return mesh;
+  }
+  const clouds = pointClouds(scene).map((pc) => [pc, pointsMesh(pc)]);
+  const dummyCamera = new THREE.PerspectiveCamera();  // the materials above take their matrices from U, not from it
 
   function frame(camera, s, viewport) {
     const cam = camera.uniforms(viewport);
+    U.u_view_proj.value.fromArray(columnMajor(cam.u_view_proj));
     U.u_inv_view_proj.value.fromArray(columnMajor(cam.u_inv_view_proj));
+    U.u_viewport.value.set(...viewport);
+    U.u_proj11.value = cam.u_proj11;
+    U.u_camera_dir.value.set(...cam.u_camera_dir);
     U.u_epsilon.value = s.epsilon ?? 1e-4 * diagonal(box);
     U.u_step_scale.value = s.stepScale;
-    U.field_isovalue.value = s.isovalue;
+    const cut = cutUniforms(s, box);
+    U.u_clip.value = cut.u_clip ? 1 : 0;
+    U.u_clip_plane.value.set(...cut.u_clip_plane);
     renderer.setClearColor(new THREE.Color(...s.background), 1);
     renderer.clear();
-    for (const p of surfacePasses(scene, s, SUPPORTED)) {
+    const passes = surfacePasses(scene, s, SUPPORTED);
+    const surface = (p) => {
+      U.field_isovalue.value = (p.field.params?.isovalue ?? 0) + s.isovalue;
       U.u_color_front.value.set(...p.front);
       U.u_color_back.value.set(...p.back);
-      quads[p.field.name].render(renderer);
+      U.u_opacity.value = p.opacity;
+      quads[`${p.field.name}|${p.opacity < 1}`].render(renderer);
+    };
+    for (const p of passes) if (p.opacity >= 1) surface(p);
+
+    const cutField = s.showCutplane ? resolveField(scene, s.cutField, false, SUPPORTED) : null;
+    if (cutField) {
+      U.field_isovalue.value = (cutField.params?.isovalue ?? 0) + s.isovalue;
+      U.u_plane_origin.value.set(...cut.u_plane_origin);
+      U.u_plane_u.value.set(...cut.u_plane_u);
+      U.u_plane_v.value.set(...cut.u_plane_v);
+      U.u_colormap_range.value = cut.u_colormap_range;
+      U.u_isoband_frequency.value = cut.u_isoband_frequency;
+      U.u_cut_opacity.value = s.cutOpacity;
+      const mesh = cutMeshes[cutField.name];
+      mesh.material.transparent = s.cutOpacity < 1;  // blended, depth still written (as the GL hosts)
+      renderer.render(sceneOf(mesh), dummyCamera);
     }
+    if (s.showPoints) {
+      for (const [pc, mesh] of clouds) {
+        U.u_point_radius.value = s.pointRadius ?? pc.radius ?? 0.005;
+        U.u_point_color.value.set(...s.pointColor);
+        renderer.render(sceneOf(mesh), dummyCamera);
+      }
+    }
+    for (const p of passes) if (p.opacity < 1) surface(p);
   }
 
   function draw(camera, s, viewport) {
@@ -216,6 +363,7 @@ export async function createRenderer(canvas, scene, { forceWebGL = false } = {})
 
   function release() {
     for (const F of Object.values(fields)) F.tex.dispose();
+    for (const m of [...Object.values(cutMeshes), ...clouds.map(([, m]) => m)]) { m.material.dispose(); m.geometry.dispose(); }
     renderer.dispose();
   }
 

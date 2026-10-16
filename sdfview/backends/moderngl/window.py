@@ -16,14 +16,69 @@ from ...scene import Scene
 from ...settings import ViewSettings
 from .renderer import Renderer
 
-HELP = """\
-  mouse   left drag: orbit · right/middle drag: pan · wheel: zoom
-  keys    S surface · C cut plane · P points · X/Y/Z cut axis · ↑/↓ move cut plane (shift: faster)
-          K clip surface at the plane · B cut plane opacity · G / F cycle the surface / cut-plane field
-          V overlay all models (G picks the opaque one) · T overlay transparency
-          [ / ] parts of an assembly (whole, all parts, part 0, 1, ...) · U color by part
-          I / O isovalue ∓ · N / M neighbors k ∓ · 1-4 resolution while dragging (1 = full) · R reset view
-          H help · Esc quit"""
+# keys and mouse; the same in the browser hosts (sdfview/web/core/app.js HELP)
+HELP_LINES = [
+	('mouse', 'left drag: orbit · right / middle drag: pan · wheel: zoom'),
+	('S C P', 'surface · cut plane · points'),
+	('X Y Z  Up Down', 'cut plane axis · move it (shift: faster)'),
+	('K  B', 'clip the surface at the plane · cut plane opacity'),
+	('G  F', 'next surface field · next cut plane field'),
+	('V  T', 'overlay all models (G picks the opaque one) · overlay transparency'),
+	('[ ]  U', 'parts of an assembly (whole, all parts, part 0, 1, ...) · color by part'),
+	('I O  N M', 'isovalue -/+ (shift: ×5) · PAT neighbors k -/+ (shift: ×8)'),
+	('1-4', 'resolution while dragging (1 = full)'),
+	('R  H  Esc', 'reset view · this help (on screen and here) · quit'),
+]
+HELP = '\n'.join(f'  {k:15s} {v}' for k, v in HELP_LINES)
+
+# a translucent rectangle behind the help text: pixel rectangle -> NDC by gl_VertexID (triangle strip of 4)
+_PANEL_VERT = """#version 330 core
+uniform vec4 u_rect;      // x0, y0, x1, y1 in pixels, origin bottom left
+uniform vec2 u_size;      // framebuffer size in pixels
+void main() {
+    vec2 c = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
+    gl_Position = vec4(2.0 * mix(u_rect.xy, u_rect.zw, c) / u_size - 1.0, 0.0, 1.0);
+}
+"""
+_PANEL_FRAG = """#version 330 core
+out vec4 frag_color;
+void main() { frag_color = vec4(0.08, 0.08, 0.08, 0.82); }
+"""
+
+
+class HelpOverlay:
+	"""HELP_LINES drawn over the window: moderngl-window's bitmap-font TextWriter2D (ASCII and Latin-1) on a panel."""
+
+	def __init__(self, ctx: moderngl.Context):
+		from moderngl_window.text.bitmapped import TextWriter2D
+
+		self.ctx = ctx
+		self.writer = TextWriter2D()
+		self.panel = ctx.program(vertex_shader=_PANEL_VERT, fragment_shader=_PANEL_FRAG)
+		self.vao = ctx.vertex_array(self.panel, [])
+		self.lines = [f'{k:15s} {v}' for k, v in HELP_LINES]
+		self.visible = True
+
+	def draw(self, size, scale: float = 1.0) -> None:
+		if not self.visible:
+			return
+		w, h = size
+		px = 16.0 * scale  # character height in pixels
+		cw = px * self.writer._meta.char_aspect_wh  # monospace: character width
+		margin, step = 10.0 * scale, 1.35 * px
+		width = max(len(line) for line in self.lines) * cw + 2 * margin
+		height = len(self.lines) * step + 2 * margin
+		x0, y1 = 12.0 * scale, h - 12.0 * scale
+		self.ctx.disable(moderngl.DEPTH_TEST)
+		self.ctx.enable(moderngl.BLEND)
+		self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+		self.panel['u_rect'].value = (x0, y1 - height, x0 + width, y1)
+		self.panel['u_size'].value = (float(w), float(h))
+		self.vao.render(moderngl.TRIANGLE_STRIP, vertices=4)
+		for i, line in enumerate(self.lines):
+			self.writer.text = line
+			self.writer.draw((x0 + margin + 0.5 * cw, y1 - margin - (i + 0.5) * step), size=px)
+		self.ctx.disable(moderngl.BLEND)
 
 
 class ViewerWindow(mglw.WindowConfig):
@@ -53,6 +108,11 @@ class ViewerWindow(mglw.WindowConfig):
 		names = [f['name'] for f in self.scene.fields]
 		self._field_names = ['auto'] + names
 		print(HELP)
+		try:
+			self._help = HelpOverlay(self.ctx)
+		except Exception as e:  # noqa: BLE001  (font resources missing: the terminal copy only)
+			print(f'(no on-screen help: {e})')
+			self._help = None
 		self._update_title()
 
 	# ---- rendering
@@ -85,6 +145,8 @@ class ViewerWindow(mglw.WindowConfig):
 		prog['u_image'].value = 0
 		prog['u_viewport'].value = (0.0, 0.0, float(bw), float(bh))
 		vao.render(moderngl.TRIANGLES, vertices=3)
+		if self._help is not None:
+			self._help.draw((bw, bh), scale=bw / max(self.wnd.size[0], 1))
 
 	def on_resize(self, width: int, height: int) -> None:
 		self._dirty = True
@@ -160,6 +222,8 @@ class ViewerWindow(mglw.WindowConfig):
 			self.camera = OrbitCamera.fit(self.renderer.box_min, self.renderer.box_max, up=self.up)
 		elif key == keys.H:
 			print(HELP)
+			if self._help is not None:
+				self._help.visible = not self._help.visible
 		else:
 			return
 		self._dirty = True
@@ -189,7 +253,7 @@ class ViewerWindow(mglw.WindowConfig):
 			if shown is None:
 				shown = f'part {v.part}' + (f' {types[v.part]}' if v.part < len(types) else '')
 			parts.append(f'assembly: {shown}{" (colored)" if v.color_parts else ""}')
-		self.wnd.title = 'sdfview — ' + ' · '.join(parts)
+		self.wnd.title = 'sdfview — ' + ' · '.join(parts) + ' · H: keys'
 
 
 def run(scene: Scene, settings: Optional[ViewSettings] = None, up: str = 'y', size=(1280, 800), window: str = 'pyglet'):

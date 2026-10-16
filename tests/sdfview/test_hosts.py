@@ -133,9 +133,17 @@ def results(node_ok, scenes, three_dir):
 				url = f'/scenes/{os.path.basename(path)}'
 				jobs.append({'host': host, 'scene': url, 'field': field, 'queries': q.reshape(-1).tolist()})
 				keys.append((host, kind, 'probe'))
-		# render smoke check on the grid scene (tracing the exact PAT field on a software GPU takes minutes)
-		jobs.append({'host': host, 'scene': f'/scenes/{os.path.basename(scenes["grid"][0])}', 'kind': 'render'})
-		keys.append((host, 'grid', 'render'))
+		# renders (tracing the exact PAT surface on a software GPU takes minutes: PAT only on the cut plane)
+		for case, (kind, _) in RENDER_CASES.items():
+			jobs.append(
+				{
+					'host': host,
+					'scene': f'/scenes/{os.path.basename(scenes[kind][0])}',
+					'kind': 'render',
+					'settings': render_settings(case, host)[0],
+				}
+			)
+			keys.append((host, case, 'render'))
 	payload = json.dumps({'base': base, 'threeDir': three_dir, 'jobs': jobs})
 	res = subprocess.run(['node', RUNNER], input=payload, capture_output=True, text=True, timeout=900)
 	server.shutdown()
@@ -181,12 +189,32 @@ def test_probe_matches_torch(results, scenes, host, kind):
 
 
 RENDER_SIZE = (160, 120)  # the canvas of web/test/probe.html
+# case -> (scene, settings as {JavaScript name: (value, ViewSettings name)})
+RENDER_CASES = {
+	'surface': ('grid', {'showCutplane': (False, 'show_cutplane')}),
+	'clip': (
+		'grid',
+		{'clipSurface': (True, 'clip_surface'), 'cutAxis': (0, 'cut_axis'), 'cutOffset': (0.2, 'cut_offset')},
+	),
+	'cut+points': ('pat', {'showSurface': (False, 'show_surface'), 'showPoints': (True, 'show_points')}),
+}
+
+
+def render_settings(case, host):
+	"""(JavaScript overrides, ViewSettings kwargs) of a render case on a host; a host without the scene's field type
+	draws no cut plane (the reference neither)."""
+	kind, settings = RENDER_CASES[case]
+	js = {k: v for k, (v, _) in settings.items()}
+	py = {name: v for v, name in settings.values()}
+	if kind not in HOSTS[host]:
+		js['showCutplane'], py['show_cutplane'] = False, False
+	return js, py
 
 
 @pytest.fixture(scope='module')
-def moderngl_image(scenes):
-	"""The grid scene through sdfview's moderngl Renderer, same camera fit and default settings except the cut plane (the
-	web hosts draw surfaces only): (h, w, 4), top row first."""
+def moderngl_images(scenes):
+	"""Reference images: the same scene, camera fit and settings through sdfview's moderngl Renderer, (h, w, 4), top
+	row first; cached per (scene, settings)."""
 	try:
 		from sdfview import OrbitCamera, ViewSettings
 		from sdfview.backends.moderngl import Renderer, create_context
@@ -194,23 +222,45 @@ def moderngl_image(scenes):
 		ctx = create_context()
 	except Exception as e:  # noqa: BLE001  (no moderngl / no EGL)
 		pytest.skip(f'moderngl unavailable: {e}')
-	r = Renderer(ctx, Scene.load(scenes['grid'][0]))
-	img = r.render(OrbitCamera.fit(r.box_min, r.box_max), ViewSettings(show_cutplane=False), size=RENDER_SIZE)
-	r.release()
-	return img
+	cache = {}
+
+	def image(kind, settings):
+		key = (kind, tuple(sorted(settings.items())))
+		if key not in cache:
+			r = Renderer(ctx, Scene.load(scenes[kind][0]))
+			cache[key] = r.render(OrbitCamera.fit(r.box_min, r.box_max), ViewSettings(**settings), size=RENDER_SIZE)
+			r.release()
+		return cache[key]
+
+	return image
 
 
-@pytest.mark.parametrize('host', list(HOSTS))
-def test_render(results, moderngl_image, host):
+def shift_tolerant_difference(img, ref):
+	"""Per pixel: min over the 3x3 neighborhood of the reference of max_channel |img - ref|. Edges that land one pixel
+	apart (rasterization rules, float rounding on a box face or a sprite border) give 0; different content does not."""
+	a = img[..., :3].astype(np.int16)
+	b = np.pad(ref[..., :3].astype(np.int16), ((1, 1), (1, 1), (0, 0)), mode='edge')
+	h, w = a.shape[:2]
+	shifts = [np.abs(a - b[1 + dy : 1 + dy + h, 1 + dx : 1 + dx + w]).max(-1) for dy in (-1, 0, 1) for dx in (-1, 0, 1)]
+	return np.min(shifts, axis=0)
+
+
+@pytest.mark.parametrize('host,case', [(h, c) for h in HOSTS for c in RENDER_CASES])
+def test_render(results, moderngl_images, host, case):
 	w, h = RENDER_SIZE
-	img = np.asarray(get(results, host, 'grid', 'render'), np.uint8).reshape(h, w, 4)[::-1]  # bottom-up -> top first
+	kind = RENDER_CASES[case][0]
+	ref = moderngl_images(kind, render_settings(case, host)[1])
+	img = np.asarray(get(results, host, case, 'render'), np.uint8).reshape(h, w, 4)[::-1]  # bottom-up -> top first
 	covered = (img[..., :3] < 250).any(-1).mean()
-	diff = np.abs(img[..., :3].astype(np.int16) - moderngl_image[..., :3]).max(-1)
-	# pixels on the silhouette may flip between hit and miss on other GPUs (float rounding); SwiftShader vs llvmpipe
-	# measured max|Δ| 1 / 255
+	diff = np.abs(img[..., :3].astype(np.int16) - ref[..., :3]).max(-1)
+	tolerant = shift_tolerant_difference(img, ref)
 	print(
-		f'\n{host}: {covered:.3f} of the pixels show the surface; vs moderngl: mean|Δ| {diff.mean():.3f}, '
-		f'pixels with |Δ| > 8: {(diff > 8).mean():.4f}, max {diff.max()}'
+		f'\n{host} {case}: {covered:.3f} of the pixels drawn; vs moderngl: |Δ| > 8 at {(diff > 8).mean():.4f} of the '
+		f'pixels (max {diff.max()}), ±1 px tolerant: {(tolerant > 8).mean():.4f} (max {tolerant.max()})'
 	)
-	assert 0.02 < covered < 0.98
-	assert (diff > 8).mean() < 0.01
+	# measured (SwiftShader vs llvmpipe), pixels with |Δ| > 8 / ±1 px tolerant: surface 0 / 0; clip 0.0018 / 0.0011;
+	# cut+points 0.0051 / 0.0022 (1-2 px sprites covered or not, overlapping sprites at equal depth, the zero contour's
+	# fwidth: GLSL allows coarse or fine derivatives). Errors seen while writing the hosts: a missing cut plane 0.12,
+	# surface depth not written 0.044.
+	assert 0.002 < covered < 0.98
+	assert (diff > 8).mean() < 0.03 and (tolerant > 8).mean() < 0.005

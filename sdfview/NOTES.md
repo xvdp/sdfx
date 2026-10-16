@@ -137,7 +137,8 @@ Fields with parts (`glsl`): keys `[` / `]` cycle the whole assembly → all part
 
 ## Not done yet
 
-- Cut plane and points in the web and slangpy hosts; PAT in TSL (three.js WebGPURenderer); the SuperFit "glsl"
-  field in WGSL / Slang (the hosts without it draw its grid bake).
+- Cut plane and points in the slangpy host; PAT in TSL (three.js WebGPURenderer; the TSL constructs it needs were
+  measured to work, see PARALLEL.md); the SuperFit "glsl" field in WGSL / Slang (the hosts without it draw its grid
+  bake).
 - Radius-mode evaluation and point areas in the shader (the original's `bvhAccumulateInRadius`, `usePointAreas`).
 - Tori, normals and ground-truth mesh overlays of the original demo; GUI widgets (keyboard only).

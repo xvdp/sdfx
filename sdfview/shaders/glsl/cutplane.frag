@@ -13,8 +13,9 @@ in vec3 v_world;
 layout(location = 0) out vec4 frag_color;
 
 void main() {
+    float phi = fieldDistance(v_world);
+    float fw = fwidth(phi);  // before the discard: every fragment of the 2x2 quad still runs
     vec3 slack = 1e-4 * (u_box_max - u_box_min);
     if (any(lessThan(v_world, u_box_min - slack)) || any(greaterThan(v_world, u_box_max + slack))) discard;
-    float phi = fieldDistance(v_world);
-    frag_color = vec4(sdfColor(phi, u_colormap_range, u_isoband_frequency), u_opacity);
+    frag_color = vec4(sdfColor(phi, fw, u_colormap_range, u_isoband_frequency), u_opacity);
 }

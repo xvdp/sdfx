@@ -7,7 +7,11 @@ export const EXTRA_COLORS = [[0.52, 0.78, 0.50], [0.80, 0.55, 0.82], [0.92, 0.55
 
 export function defaultSettings(overrides = {}) {
   return {
+    showSurface: true,
+    showCutplane: true,
+    showPoints: false,
     surfaceField: 'auto',       // field name, or 'auto': the first model's cheapest field to trace
+    cutField: 'auto',           // field name, or 'auto': the first model's exact field
     surfaceMode: 'single',      // 'single' | 'overlay' (every model; the selected one opaque)
     overlayOpacity: 1.0,        // < 1: other models blended without depth writes
     modelColors: null,          // {model: [r, g, b]}
@@ -16,6 +20,16 @@ export function defaultSettings(overrides = {}) {
     isovalue: 0.0,
     k: null,                    // PAT neighbors (null: the scene's)
     lambdaScale: null,          // PAT λ scale (null: the scene's)
+    // cut plane n·x = c through the box: normal = axis unless cutNormal; offset in [-1, 1] across the box
+    cutAxis: 2,
+    cutNormal: null,
+    cutOffset: 0.0,
+    clipSurface: false,         // hide the surface on the side n·x > c
+    colormapRange: null,        // null: ½ of the box diagonal
+    isobandFrequency: 60.0,
+    cutOpacity: 1.0,
+    pointRadius: null,          // null: the point cloud's radius
+    pointColor: [0.15, 0.35, 0.75],
     maxSteps: 128,
     epsilon: null,              // null: 1e-4 of the box diagonal
     stepScale: 0.9,
@@ -71,7 +85,7 @@ export function modelColor(scene, model, s) {
 // [{field, front, back, opacity}] of the surfaces to draw
 export function surfacePasses(scene, s, supported = null) {
   const primary = resolveField(scene, s.surfaceField, true, supported);
-  if (!primary) return [];
+  if (!s.showSurface || !primary) return [];
   const ms = models(scene);
   const fields = [[primary, 1.0]];
   if (s.surfaceMode === 'overlay') {
@@ -87,6 +101,40 @@ export function surfacePasses(scene, s, supported = null) {
     return { field, front, back, opacity };
   });
 }
+
+// cut plane n·x = c through the box (as cut_plane in sdfview/settings.py): unit normal n, offset c, rectangle
+// origin and half-axes u, v (the rectangle covers the box's projection; fragments outside the box are discarded)
+export function cutPlane(s, [lo, hi]) {
+  const center = [0, 1, 2].map((i) => 0.5 * (lo[i] + hi[i]));
+  const half = [0, 1, 2].map((i) => 0.5 * (hi[i] - lo[i]));
+  let n = s.cutNormal ? [...s.cutNormal] : [0, 1, 2].map((i) => (i === s.cutAxis ? 1 : 0));
+  const len = Math.hypot(...n);
+  n = n.map((x) => x / len);
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const reach = Math.abs(n[0]) * half[0] + Math.abs(n[1]) * half[1] + Math.abs(n[2]) * half[2];
+  const c = dot(n, center) + s.cutOffset * reach;
+  const origin = center.map((x, i) => x + (c - dot(n, center)) * n[i]);
+  const k = n.map(Math.abs).indexOf(Math.min(...n.map(Math.abs)));  // the axis least aligned with n
+  let u = cross(n, [0, 1, 2].map((i) => (i === k ? 1 : 0)));
+  const ul = Math.hypot(...u);
+  u = u.map((x) => x / ul);
+  const v = cross(n, u);
+  const r = Math.hypot(...half);
+  return { n, c, origin, u: u.map((x) => x * r), v: v.map((x) => x * r) };
+}
+
+// the uniforms of the cut plane and of the surface's clip half-space (GLSL / WGSL names)
+export function cutUniforms(s, box) {
+  const { n, c, origin, u, v } = cutPlane(s, box);
+  return {
+    u_plane_origin: origin, u_plane_u: u, u_plane_v: v, u_clip: s.clipSurface && s.showCutplane,
+    u_clip_plane: [...n, c], u_colormap_range: s.colormapRange ?? 0.5 * diagonal(box),
+    u_isoband_frequency: s.isobandFrequency, u_opacity: s.cutOpacity,
+  };
+}
+
+export const pointClouds = (scene) => scene.manifest.pointclouds ?? [];
 
 export function fieldPart(field, s) {
   const n = field.glsl?.n_parts ?? 0;

@@ -1,7 +1,8 @@
 // colormap.glsl — signed-distance colormap with isobands, from ext/points-as-tori/demo/shaders_3d.py
 // (colormap_SDF, darken_color, cutplaneColor): t = (φ - min) / (max - min); t < ½: white→blue with weight (2t)^7
 // (blue just inside the surface), t > ½: white→grapefruit, linear in 2t - 1; isobands darken by 10% where
-// sin(-f φ) > 0. Added here: the zero level set drawn as a line ~1.5 px wide (screen-space derivative fwidth).
+// sin(-f φ) > 0. Added here: the zero level set drawn as a line ~1.5 px wide (screen-space derivative fw = fwidth(φ),
+// taken by the caller before any discard: derivatives are undefined once a fragment of the 2x2 quad has discarded).
 
 float segment(float edge0, float edge1, float x) {
     return step(edge0, x) * (1.0 - step(edge1, x));
@@ -47,10 +48,10 @@ vec3 darken_color(vec3 color, float t) {
 }
 
 // color of a field value: colormap over [-range, range], isobands of frequency `freq`, zero contour of ~1.5 px
-vec3 sdfColor(float phi, float range, float freq) {
+vec3 sdfColor(float phi, float fw, float range, float freq) {
     float dark_factor = 0.9;
     dark_factor *= 1.0 - 0.1 * smoothstep(-0.01, 0.01, sin(-freq * phi));
     vec3 col = darken_color(colormap_SDF(normalize_scalar(-range, range, phi)), dark_factor);
-    float line = 1.0 - smoothstep(0.5, 1.5, abs(phi) / max(fwidth(phi), 1e-12));
+    float line = 1.0 - smoothstep(0.5, 1.5, abs(phi) / max(fw, 1e-12));
     return mix(col, vec3(0.1), line);
 }

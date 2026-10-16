@@ -29,6 +29,18 @@ struct Uniforms {
     pat_max_exp_arg: f32,       // 244
     u_count: i32,               // 248  probe: number of queries
     u_color_parts: i32,         // 252
-}                               // 256 bytes
+    u_clip_plane: vec4f,        // 256  surface: keep n·x <= c, (n, c)
+    u_plane_origin: vec3f,      // 272  cut plane: rectangle origin ± u ± v
+    u_clip: i32,                // 284  surface: clip at u_clip_plane (0 / 1)
+    u_plane_u: vec3f,           // 288
+    u_colormap_range: f32,      // 300
+    u_plane_v: vec3f,           // 304
+    u_isoband_frequency: f32,   // 316
+    u_camera_dir: vec3f,        // 320  points: view direction
+    u_point_radius: f32,        // 332
+    u_point_color: vec3f,       // 336
+    u_proj11: f32,              // 348  P[1][1] = cot(fov_y / 2)
+    u_has_normals: i32,         // 352
+}                               // 368 bytes (struct size: a multiple of its 16-byte alignment)
 
 @group(0) @binding(0) var<uniform> U: Uniforms;

@@ -31,13 +31,19 @@
       window.sdfxError = `${host}: ${e}`;
       throw e;
     }
-    const canvas = document.getElementById('c');
+    let canvas = document.getElementById('c');
     const cache = new Map();
     async function renderer(sceneUrl) {
       if (!cache.has(sceneUrl)) {
-        for (const r of cache.values()) r.release();
-        cache.clear();
-        // a fresh canvas per scene (a canvas keeps the context type it was first given)
+        if (cache.size) {
+          // a fresh canvas per scene: a canvas keeps the context type it was first given, and three.js' WebGL
+          // backend loses its context on dispose()
+          for (const r of cache.values()) r.release();
+          cache.clear();
+          const fresh = canvas.cloneNode(false);
+          canvas.replaceWith(fresh);
+          canvas = fresh;
+        }
         cache.set(sceneUrl, await createRenderer(canvas, await loadScene(sceneUrl), options[host]));
       }
       return cache.get(sceneUrl);
