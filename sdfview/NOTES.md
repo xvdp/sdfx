@@ -9,24 +9,33 @@ sampled on a grid (`grid`), and generated GLSL (`glsl`: a SuperFit assembly as t
 sdfview/
   scene.py                 file format (.sdfx): JSON manifest + binary arrays, Python reader/writer
   camera.py, settings.py   orbit camera and view settings (NumPy / plain data, backend independent)
+  view.py                  field choice per model, surface passes, model colors, scene box (all Python hosts)
+  png.py                   minimal PNG writer
   accel/lbvh.py            re-export of the LBVH builder in points_as_tori/bvh.py (port of the original bvh.cpp)
   sources/pat.py           PointsAsTori -> scene (points, tori, BVH, point cloud, optional grid bake)
   sources/grid.py          any torch SDF -> regular grid, in z-slabs
   sources/superfit.py      SuperFit primitive assembly (superfit_sdf) -> generated GLSL field (+ optional grid bake)
-  shaders/__init__.py      GLSL assembly: version header per target (gl330 | webgl2) + #include resolution
+  shaders/__init__.py      assembly: GLSL (version header per target gl330 | webgl2 | three, #include), WGSL
+                           (preprocessor: include, ifdef / if defined / elif / else, valued defines as consts)
   shaders/glsl/            modules: common, bvh, field_pat, field_grid, field, camera, colormap
                            programs: fullscreen.vert, surface.frag, cutplane.{vert,frag}, points.{vert,frag},
                            probe.frag, probe_knn.frag, blit.frag
+  shaders/wgsl/            the same modules in WGSL; programs surface.wgsl, probe.wgsl (compute)
+  shaders/slang/           field (interface IField), field_pat (PatField), field_grid (GridField), camera, surface,
+                           probe; common and bvh are points_as_tori/slang/ (shared with the fused k-NN kernel)
   backends/moderngl/       Renderer (any moderngl context), headless (EGL), window (moderngl-window)
+  backends/slangpy/        Renderer: the Slang modules as compute kernels (render, probe), surfaces only
   web/scene.js             scene reader for the browser / Node
-  __main__.py              CLI: pat | superfit | view | render | info
+  web/core/                shaders.js (the Python assembly in JS, identical output), camera.js, view.js, app.js
+  web/webgl2/, web/webgpu/ raw API hosts (renderer.js + index.html)
+  web/three/               three.js hosts: webgl_renderer.js (GLSL in RawShaderMaterials, sdfMesh for three.js
+                           scenes), webgpu_renderer.js (TSL); pages webgl.html, webgpu.html, compose.html
+  web/test/                probe.html + run_probe.mjs: headless Chromium runner of tests/sdfview/test_hosts.py
+  server.py                static server for the web hosts (python -m sdfview serve)
+  __main__.py              CLI: pat | superfit | view | render (--backend moderngl | slangpy) | merge | serve | info
 ```
 
-Second pass (planned, same module names so files compare one to one):
-`shaders/slang/*.slang` (didactic parallel implementation; the BVH module exists as `points_as_tori/slang/bvh.slang`,
-a function-by-function mirror of `shaders/glsl/bvh.glsl` run as a torch k-NN kernel), `shaders/wgsl/*.wgsl` (WebGPU),
-`web/webgl2/`, `web/webgpu/`, `web/three/` (three.js adapter: a ShaderMaterial on a full-screen quad / plane fed
-with the same textures).
+The hosts side by side (steps, names, layout, deviations, measured parity): `PARALLEL.md`.
 
 ## Scene format
 
@@ -108,7 +117,7 @@ tagged `"model"` (an optional key; older readers ignore it), bounds = union. The
 Coincident surfaces in an opaque overlay alternate pixel by pixel (depth fighting); the translucent mode shows them
 without it.
 
-Field choice per model (`Renderer.model_field`; 'auto' = the first model's): surfaces take the cheapest field to
+Field choice per model (`view.model_field`, `web/core/view.js`; 'auto' = the first model's): surfaces take the cheapest field to
 trace (`glsl`, then `grid`, then `pat`), the cut plane the exact one (`glsl` / `pat`, then `grid`).
 
 Fields with parts (`glsl`): keys `[` / `]` cycle the whole assembly → all parts as separate solids → part 0, 1, ...
@@ -128,8 +137,7 @@ Fields with parts (`glsl`): keys `[` / `]` cycle the whole assembly → all part
 
 ## Not done yet
 
-- WebGL2 / WebGPU / three.js front ends (`web/` has the scene reader only; the GLSL compiles as ES 3.00).
-- Slang mirrors of the render modules (common and bvh exist in `points_as_tori/slang/`, with tensors in place of
-  textures); WGSL mirrors.
+- Cut plane and points in the web and slangpy hosts; PAT in TSL (three.js WebGPURenderer); the SuperFit "glsl"
+  field in WGSL / Slang (the hosts without it draw its grid bake).
 - Radius-mode evaluation and point areas in the shader (the original's `bvhAccumulateInRadius`, `usePointAreas`).
 - Tori, normals and ground-truth mesh overlays of the original demo; GUI widgets (keyboard only).

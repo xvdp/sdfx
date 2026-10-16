@@ -5,15 +5,14 @@ Headless rendering (no window): an offscreen OpenGL 3.3 context. On Linux the EG
 
 from __future__ import annotations
 
-import struct
 import sys
-import zlib
 from typing import Optional
 
 import moderngl
 import numpy as np
 
 from ...camera import OrbitCamera
+from ...png import write_png  # noqa: F401  (re-exported)
 from ...scene import Scene
 from ...settings import ViewSettings
 from .renderer import Renderer
@@ -31,21 +30,6 @@ def create_context(backend: Optional[str] = None) -> moderngl.Context:
 		except Exception as e:  # noqa: BLE001 - report every backend's failure
 			tried.append(f'{b or "default"}: {e}')
 	raise RuntimeError('no OpenGL 3.3 context available:\n  ' + '\n  '.join(tried))
-
-
-def write_png(path: str, rgba: np.ndarray) -> None:
-	"""Minimal PNG writer (8-bit RGBA, no dependencies)."""
-	h, w = rgba.shape[:2]
-	raw = b''.join(b'\x00' + np.ascontiguousarray(rgba[y], np.uint8).tobytes() for y in range(h))
-
-	def chunk(tag, data):
-		return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data) & 0xFFFFFFFF)
-
-	with open(path, 'wb') as f:
-		f.write(b'\x89PNG\r\n\x1a\n')
-		f.write(chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0)))
-		f.write(chunk(b'IDAT', zlib.compress(raw, 6)))
-		f.write(chunk(b'IEND', b''))
 
 
 def render_image(

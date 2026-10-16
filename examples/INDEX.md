@@ -26,6 +26,8 @@ examples were written on (4 threads, no GPU); GPU paths were not run there.
 | `hosts/sdfview_headless.py` | view | `.sdfx` → PNG images and GPU probes, without a display (EGL) |
 | `hosts/sdfview_embedded.py` | view | sdfview's Renderer inside your own moderngl app (two viewports) |
 | `hosts/slang_knn.py` | k-NN | the fused Slang kernel from torch (CUDA, Vulkan, CPU tensors) vs the torch BVH |
+| `hosts/slangpy_render.py` | view | `.sdfx` → PNG through the Slang modules (slangpy compute kernels), compared with moderngl |
+| `hosts/web_hosts.sh` | view | `.sdfx` → local server; browser hosts: WebGL2, WebGPU, three.js (WebGL, WebGPU / TSL, an SDF in a three.js scene) |
 | **Measurements** | | |
 | `benchmarks/run_benchmarks.sh` | measure | k-NN backends (GPU; CPU with scipy and the original C++), LBVH build, port stages, Slang |
 | `benchmarks/run_tests.sh` | test | CPU tests; with the reference build; GPU parity and Slang on every GPU |
@@ -33,7 +35,8 @@ examples were written on (4 threads, no GPU); GPU paths were not run there.
 ## Order
 
 1. `00_install.sh` (once).
-2. PAT inference: `pat/01_fit.py`, view with `hosts/sdfview_window.py` or `python -m sdfview view`.
+2. PAT inference: `pat/01_fit.py`, view with `hosts/sdfview_window.py` or `python -m sdfview view`; in a browser with
+   `hosts/web_hosts.sh` (the hosts side by side: `sdfview/PARALLEL.md`).
 3. PAT training on new data: `pat/02_make_dataset.py` → `pat/04_train_new.py` → `pat/05_fit_trained.py`;
    on the original data: download it (Google Drive link in `ext/points-as-tori/README.md`, 6.2 GB) →
    `pat/03_train_original.py --check`, then the schedule.

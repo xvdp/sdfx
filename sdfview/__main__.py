@@ -121,18 +121,28 @@ def cmd_view(a):
 
 
 def cmd_render(a):
-	from .backends.moderngl.headless import render_image, write_png
 	from .camera import OrbitCamera
+	from .png import write_png
 	from .scene import Scene
+	from .view import scene_box
 
 	scene = Scene.load(a.scene)
-	cam = OrbitCamera.fit(scene.bounds_min, scene.bounds_max, up=a.up)
+	cam = OrbitCamera.fit(*scene_box(scene), up=a.up)
 	cam.yaw, cam.pitch = math.radians(a.yaw), math.radians(a.pitch)
 	cam.zoom(a.zoom)
 	t = time.perf_counter()
-	img = render_image(scene, cam, _settings(a), size=a.size)
+	if a.backend == 'slangpy':  # Slang compute kernels (surfaces only: no cut plane, no points)
+		from .backends.slangpy import Renderer
+
+		r = Renderer(scene)
+		img = r.render(cam, _settings(a), size=a.size)
+		r.release()
+	else:
+		from .backends.moderngl.headless import render_image
+
+		img = render_image(scene, cam, _settings(a), size=a.size)
 	write_png(a.output, img)
-	print(f'wrote {a.output} ({a.size[0]}x{a.size[1]}, {time.perf_counter() - t:.2f} s)')
+	print(f'wrote {a.output} ({a.size[0]}x{a.size[1]}, {a.backend}, {time.perf_counter() - t:.2f} s)')
 
 
 def cmd_merge(a):
@@ -218,6 +228,9 @@ def main(argv=None):
 	p.add_argument('--yaw', type=float, default=35.0, help='degrees about the up axis')
 	p.add_argument('--pitch', type=float, default=25.0, help='degrees')
 	p.add_argument('--zoom', type=float, default=0.0, help='zoom steps (each 10%% closer)')
+	p.add_argument(
+		'--backend', choices=['moderngl', 'slangpy'], default='moderngl', help='slangpy: Slang kernels, surfaces only'
+	)
 	_view_args(p)
 	p.set_defaults(func=cmd_render)
 

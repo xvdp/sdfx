@@ -19,16 +19,14 @@ from typing import Dict, Optional, Tuple
 import moderngl
 import numpy as np
 
+from ... import view
 from ...camera import OrbitCamera
-from ...scene import Scene, model_of
+from ...scene import Scene
 from ...settings import ViewSettings, cut_plane
 from ...shaders import glsl_source
+from ...view import EXTRA_COLORS, MODEL_COLORS  # noqa: F401  (re-exported)
 
 TEXTURE_WIDTH = 4096  # texels per row of array textures (>= the WebGL2 minimum for MAX_TEXTURE_SIZE)
-
-# surface colors of models (scenes with several models: sdfview.scene.merge_scenes)
-MODEL_COLORS = {'pat': (0.86, 0.70, 0.45), 'sup': (0.42, 0.62, 0.90), 'gt': (0.72, 0.72, 0.72)}
-EXTRA_COLORS = [(0.52, 0.78, 0.50), (0.80, 0.55, 0.82), (0.92, 0.55, 0.45), (0.45, 0.80, 0.80)]
 
 
 def array_texture(ctx: moderngl.Context, array: np.ndarray, width: int = TEXTURE_WIDTH) -> moderngl.Texture:
@@ -92,13 +90,7 @@ class Renderer:
 				name = pc.get(key)
 				if name and name not in self.textures:
 					self.textures[name] = array_texture(ctx, scene.arrays[name], self.texture_width)
-		if scene.bounds_min is not None:
-			self.box_min, self.box_max = np.array(scene.bounds_min), np.array(scene.bounds_max)
-		else:  # union of the fields' boxes, else the unit cube [-1, 1]³
-			boxes = [(f['bounds']['min'], f['bounds']['max']) for f in scene.fields if 'bounds' in f]
-			lo = np.min([b[0] for b in boxes], axis=0) if boxes else -np.ones(3)
-			hi = np.max([b[1] for b in boxes], axis=0) if boxes else np.ones(3)
-			self.box_min, self.box_max = np.asarray(lo, float), np.asarray(hi, float)
+		self.box_min, self.box_max = view.scene_box(scene)
 		self.diagonal = float(np.linalg.norm(self.box_max - self.box_min))
 
 	# ---- programs
@@ -156,50 +148,23 @@ class Renderer:
 			_set(prog, 'field_gradient_step', 5e-4 * float(np.linalg.norm(hi - lo)))
 		return unit
 
+	# field choice per model, surface passes: sdfview/view.py (shared with the other hosts)
+
 	@staticmethod
 	def field_part(field: dict, settings: ViewSettings) -> int:
-		"""Part shown for a field with parts: settings.part if in range (-2 all parts, i >= 0 part i), else -1."""
-		n = int(field.get('glsl', {}).get('n_parts', 0))
-		return settings.part if -2 <= settings.part < n else -1
+		return view.field_part(field, settings)
 
 	def models(self) -> list:
-		"""Model names of the fields, in field order (a field without a "model" key is its own model)."""
-		out = []
-		for f in self.scene.fields:
-			if model_of(f) not in out:
-				out.append(model_of(f))
-		return out
-
-	# preference among a model's fields: surfaces are traced with many evaluations per pixel (cheap fields first:
-	# generated GLSL, then grids, then PAT's exact k-NN blend); the cut plane evaluates once per pixel (exact first)
-	SURFACE_ORDER = {'glsl': 0, 'grid': 1}
-	CUT_ORDER = {'grid': 1}
-
-	@classmethod
-	def _preferred(cls, fields: list, for_surface: bool) -> Optional[dict]:
-		rank = cls.SURFACE_ORDER if for_surface else cls.CUT_ORDER
-		return min(fields, key=lambda f: rank.get(f['type'], 2 if for_surface else 0)) if fields else None
+		return view.models(self.scene)
 
 	def model_field(self, model: str, for_surface: bool = True) -> Optional[dict]:
-		"""The field drawn for a model: for surfaces its cheapest field to trace, for the cut plane its exact field."""
-		return self._preferred([f for f in self.scene.fields if model_of(f) == model], for_surface)
+		return view.model_field(self.scene, model, for_surface)
 
 	def model_color(self, model: str, settings: ViewSettings):
-		if settings.model_colors and model in settings.model_colors:
-			return tuple(settings.model_colors[model])
-		if model in MODEL_COLORS:
-			return MODEL_COLORS[model]
-		others = [m for m in self.models() if m not in MODEL_COLORS]
-		return EXTRA_COLORS[others.index(model) % len(EXTRA_COLORS)] if model in others else EXTRA_COLORS[0]
+		return view.model_color(self.scene, model, settings)
 
 	def resolve_field(self, which: str, for_surface: bool) -> Optional[dict]:
-		if which != 'auto':
-			f = self.scene.field(which)
-			if f is None:
-				raise KeyError(f'no field {which!r} in the scene')
-			return f
-		models = self.models()  # 'auto': the first model's field (its cheapest to trace / its exact one)
-		return self.model_field(models[0], for_surface) if models else None
+		return view.resolve_field(self.scene, which, for_surface)
 
 	# ---- drawing
 
@@ -281,27 +246,7 @@ class Renderer:
 			ctx.disable(moderngl.BLEND)
 
 	def surface_passes(self, s: ViewSettings) -> list:
-		"""
-		[(field, color_front, color_back, opacity)] of the surfaces to draw: surface_field alone ('single'), or one field
-		per model ('overlay': surface_field's model opaque, the others with overlay_opacity). With several models in
-		the scene, each surface takes its model's color.
-		"""
-		primary = self.resolve_field(s.surface_field, True)
-		if not s.show_surface or primary is None:
-			return []
-		models = self.models()
-		fields = [(primary, 1.0)]
-		if s.surface_mode == 'overlay':
-			fields += [(self.model_field(m), float(s.overlay_opacity)) for m in models if m != model_of(primary)]
-		out = []
-		for field, opacity in fields:
-			if len(models) > 1:
-				front = self.model_color(model_of(field), s)
-				back = tuple(0.55 * x for x in front)
-			else:
-				front, back = tuple(s.color_front), tuple(s.color_back)
-			out.append((field, front, back, opacity))
-		return out
+		return view.surface_passes(self.scene, s)
 
 	def _draw_surface(self, field, s: ViewSettings, cam: dict, clip_plane, eps, color_front, color_back, opacity):
 		prog, vao = self.program('fullscreen.vert', 'surface.frag', field)
