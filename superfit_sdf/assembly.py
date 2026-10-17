@@ -206,7 +206,8 @@ class SuperFitSDF:
 		assembly: path to primitive_assembly.pkl, its loaded dict, or a geolipi state {'expr_str', ...}
 		program: 'best', 'latest' or a key (see select_program)
 		mesh: input mesh (path, or (n, 3) vertices) to evaluate in its frame instead of SuperFit's normalized frame
-		device, dtype: where and in which precision the expression is evaluated
+		device, dtype: where and in which precision the expression is evaluated (device default: cuda if available,
+			else cpu)
 	"""
 
 	def __init__(
@@ -214,10 +215,12 @@ class SuperFitSDF:
 		assembly: Union[str, dict],
 		program: str = 'best',
 		mesh=None,
-		device: Union[str, torch.device] = 'cpu',
+		device: Optional[Union[str, torch.device]] = None,
 		dtype: torch.dtype = torch.float32,
 	):
 		gls, self._evaluate, Sketcher, fetch_singular_expr_eval, primitives = import_superfit()
+		if device is None:
+			device = 'cuda' if torch.cuda.is_available() else 'cpu'
 		self.device, self.dtype = torch.device(device), dtype
 		data = load_assembly(assembly) if isinstance(assembly, str) else assembly
 		if isinstance(data, dict) and 'expr_str' in data:
@@ -294,7 +297,7 @@ def _read_mesh_vertices(path: str) -> np.ndarray:
 
 
 def sdf_from_assembly(
-	path: str, program: str = 'best', mesh: Optional[Union[str, Sequence]] = None, device='cpu', dtype=torch.float32
+	path: str, program: str = 'best', mesh: Optional[Union[str, Sequence]] = None, device=None, dtype=torch.float32
 ) -> SuperFitSDF:
 	"""Convenience constructor (see SuperFitSDF)."""
 	return SuperFitSDF(path, program=program, mesh=mesh, device=device, dtype=dtype)

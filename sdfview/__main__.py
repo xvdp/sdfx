@@ -65,7 +65,7 @@ def cmd_pat(a):
 
 	from .sources.pat import scene_from_pat
 
-	pat.set_device(a.device, torch.float64 if a.float64 else torch.float32)
+	pat.set_device(a.device or pat.default_device(), torch.float64 if a.float64 else torch.float32)
 	points, normals = pat.read_point_cloud(a.input)
 	t = time.perf_counter()
 	sdf = pat.PointsAsTori(points, normals, model_path=a.model)
@@ -187,7 +187,7 @@ def main(argv=None):
 	p = sub.add_parser('pat', help='Points as Tori: point cloud (.ply) -> scene (.sdfx)')
 	p.add_argument('input')
 	p.add_argument('-o', '--output', required=True)
-	p.add_argument('--device', default='cpu', help="torch device, e.g. 'cuda'")
+	p.add_argument('--device', default=None, help='torch device (default: cuda if available, else cpu)')
 	p.add_argument('--float64', action='store_true', help='float64 geometry (default float32)')
 	p.add_argument('--model', default=None, help='network checkpoint (.pt); default: the bundled model')
 	p.add_argument('--k', type=int, default=32, help='neighbors of the blend')
@@ -211,7 +211,7 @@ def main(argv=None):
 		'--mesh', default=None, help="input mesh: evaluate in its frame (default: SuperFit's normalized frame)"
 	)
 	p.add_argument('--bake', type=int, default=0, help='also bake the torch evaluation on a grid of N per side')
-	p.add_argument('--device', default='cpu', help="torch device, e.g. 'cuda'")
+	p.add_argument('--device', default=None, help='torch device (default: cuda if available, else cpu)')
 	p.add_argument('--float64', action='store_true')
 	p.add_argument('--view', action='store_true', help='open the viewer afterwards')
 	_view_args(p)

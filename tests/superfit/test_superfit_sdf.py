@@ -99,8 +99,8 @@ def test_program_selection_and_evaluation(tmp_path):
 
 def test_kept_primitive_changes_the_field(tmp_path):
 	q = torch.tensor([[0.0, -0.6, 0.0]], dtype=torch.float64)  # centre of the third primitive
-	dropped = SuperFitSDF(assembly_expr(drop_third=True).sympy().state(), dtype=torch.float64)
-	kept = SuperFitSDF(assembly_expr(drop_third=False).sympy().state(), dtype=torch.float64)
+	dropped = SuperFitSDF(assembly_expr(drop_third=True).sympy().state(), dtype=torch.float64, device='cpu')
+	kept = SuperFitSDF(assembly_expr(drop_third=False).sympy().state(), dtype=torch.float64, device='cpu')
 	assert kept.n_primitives == 3 and dropped.n_primitives == 2
 	assert float(kept(q.T)[0]) < 0 < float(dropped(q.T)[0])
 
@@ -108,7 +108,7 @@ def test_kept_primitive_changes_the_field(tmp_path):
 def test_frames(tmp_path):
 	"""Signs at known points; the mesh frame is the normalized frame mapped through p_n = s (p - c)."""
 	state = assembly_expr().sympy().state()
-	sdf = SuperFitSDF(state, dtype=torch.float64)
+	sdf = SuperFitSDF(state, dtype=torch.float64, device='cpu')
 	inside = torch.tensor([[0.2, 0.0, 0.0], [-0.3, 0.2, 0.1]], dtype=torch.float64).T  # primitive centres
 	outside = torch.tensor([[0.95, 0.95, 0.95], [-0.95, -0.95, 0.95]], dtype=torch.float64).T
 	assert (sdf(inside) < 0).all() and (sdf(outside) > 0).all()
@@ -120,7 +120,7 @@ def test_frames(tmp_path):
 	)  # extent 4 (x and y), centre (12, 4, 0)
 	s, c = mesh_normalization(vertices)
 	assert s == pytest.approx(1.8 / 4.0) and np.allclose(c, [12.0, 4.0, 0.0])
-	in_mesh = SuperFitSDF(state, mesh=vertices, dtype=torch.float64)
+	in_mesh = SuperFitSDF(state, mesh=vertices, dtype=torch.float64, device='cpu')
 	p = torch.tensor(c)[:, None] + inside / s  # the primitive centres in the mesh frame
 	assert torch.allclose(in_mesh(p), sdf(inside) / s, rtol=1e-12, atol=1e-12)
 	lo, hi = in_mesh.bounds()
@@ -146,14 +146,14 @@ def test_zero_bulge_warns():
 		(0.5, 0.5, 0.5), 0.2, 0.0, 1.0, 0.0, 0.0, (2.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (3.0, -3.0)
 	)
 	with pytest.warns(RuntimeWarning, match='bulge = 0'):
-		SuperFitSDF(p.sympy().state())
+		SuperFitSDF(p.sympy().state(), device='cpu')
 
 
 def test_scene_bake(tmp_path):
 	from sdfview.scene import Scene
 	from sdfview.sources.superfit import scene_from_superfit
 
-	sdf = SuperFitSDF(assembly_expr().sympy().state())
+	sdf = SuperFitSDF(assembly_expr().sympy().state(), device='cpu')
 	scene = scene_from_superfit(sdf, resolution=24)
 	path = os.path.join(tmp_path, 'sup.sdfx')
 	scene.save(path)

@@ -139,7 +139,7 @@ def bench_training(device, reps, n_points=2048, k=64, batch=1024, n_queries=120)
 
 def main():
 	ap = argparse.ArgumentParser()
-	ap.add_argument('--device', default='cpu')
+	ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
 	ap.add_argument('--dtype', default='float32', choices=['float32', 'float64'])
 	ap.add_argument('--points', type=int, nargs='+', default=[100_000], help='sizes of the sphere clouds')
 	ap.add_argument('--queries', type=int, nargs='+', default=[100_000, 1_000_000])

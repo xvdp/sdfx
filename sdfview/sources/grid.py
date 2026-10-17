@@ -23,10 +23,13 @@ def bake_grid(
 	Args:
 		fn: (3, n) tensor -> (n,) tensor (e.g. lambda q: sdf.signed_distance(q))
 		resolution: int or (W, H, D) samples per axis (>= 2)
+		device: of the queries (default: cuda if available, else cpu; pass fn's device)
 		max_points: queries per call to fn (whole z-slices, at least one)
 	Returns:
 		(D, H, W) float32 NumPy array (host)
 	"""
+	if device is None:
+		device = 'cuda' if torch.cuda.is_available() else 'cpu'
 	res = (resolution,) * 3 if np.isscalar(resolution) else tuple(resolution)
 	w, h, d = (int(r) for r in res)
 	lo = torch.as_tensor(bounds_min, dtype=dtype, device=device)

@@ -42,7 +42,7 @@ def gl_ctx():
 
 def three_parts():
 	"""Smooth union of three SuperFrusta (one with a zero rotation), all kept."""
-	return SuperFitSDF(assembly_expr(drop_third=False).sympy().state(), dtype=torch.float64)
+	return SuperFitSDF(assembly_expr(drop_third=False).sympy().state(), dtype=torch.float64, device='cpu')
 
 
 def queries(n=4000, seed=0, scale=1.0, center=(0.0, 0.0, 0.0)):
@@ -105,7 +105,7 @@ def test_mesh_frame(gl_ctx):
 	"""φ(p) = φ_n(s (p - c)) / s in the generated code as in SuperFitSDF(mesh=...)."""
 	rng = np.random.default_rng(3)
 	vertices = rng.uniform(-1, 1, size=(50, 3)) * np.array([3.0, 1.0, 2.0]) + np.array([5.0, -2.0, 1.0])
-	sdf = SuperFitSDF(assembly_expr().sympy().state(), mesh=vertices, dtype=torch.float64)
+	sdf = SuperFitSDF(assembly_expr().sympy().state(), mesh=vertices, dtype=torch.float64, device='cpu')
 	q = queries(seed=4, scale=sdf.scale, center=sdf.center)
 	ref = sdf(torch.as_tensor(q).T).numpy()
 	got = probe(gl_ctx, sdf, q)[:, 0]
@@ -121,7 +121,7 @@ def test_union_of_parts_and_single_primitive(gl_ctx):
 	r = primitive((0.2, 0.5, 0.2), 0.6, 0.0, 1.0, 0.3, 0.0, (2.0, 0.0, 0.0), (0.0, 0.0, 0.4), (0.0, 0.3, 0.0), (3, -3))
 	q = queries(seed=5)
 	for expr in (p, gls.Union(p, r)):
-		sdf = SuperFitSDF(expr.sympy().state(), dtype=torch.float64)
+		sdf = SuperFitSDF(expr.sympy().state(), dtype=torch.float64, device='cpu')
 		ref = sdf(torch.as_tensor(q).T).numpy()
 		assert np.abs(probe(gl_ctx, sdf, q)[:, 0] - ref).max() < TOL
 

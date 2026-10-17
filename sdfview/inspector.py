@@ -233,7 +233,8 @@ _MODELS: dict = {}
 
 def explain_network(scene: Scene, ins: Inspection, model=None) -> Optional[dict]:
 	"""
-	Run the network on point j's neighborhood (points_as_tori.explain.explain_point, CPU float32): the attribution of
+	Run the network on point j's neighborhood (points_as_tori.explain.explain_point, float32 on the points_as_tori
+	device: set_device's, else cuda if available, else cpu): the attribution of
 	every neighbor (attention rollout, gradient of κ) and least-squares curvatures for comparison. The model: `model`,
 	else the field's 'network_model' parameter ('bundled' or a checkpoint path), else the bundled one. Sets and returns
 	ins.explanation and reorders ins.network as the network saw it; None without torch / points_as_tori / normals.
@@ -254,19 +255,17 @@ def explain_network(scene: Scene, ins: Inspection, model=None) -> Optional[dict]
 	if model is None:
 		name = f.get('params', {}).get('network_model', 'bundled')
 		path = DEFAULT_MODEL_PATH if name == 'bundled' or not os.path.isfile(str(name)) else name
-		if path not in _MODELS:
-			try:
-				config.get_device()
-			except RuntimeError:  # nothing configured in this process: the CPU (an existing choice is kept)
-				config.set_device('cpu', torch.float32)
+		key = (path, config.get_device())
+		if key not in _MODELS:
 			m, _ = FundamentalFormPredictor.load_saved_model(path)
-			_MODELS[path] = m.to('cpu', torch.float32).eval()
-		model = _MODELS[path]
+			_MODELS[key] = m.to(key[1], torch.float32).eval()
+		model = _MODELS[key]
+	device = next(model.parameters()).device
 	points, outlier = _arrays(scene, f)[:2]
 	j = int(ins.neighbors[ins.selected])
-	P = torch.as_tensor(points.T, dtype=torch.float32)
-	N = torch.as_tensor(normals.T, dtype=torch.float32)
-	ex = explain_point(model, P, N, j, ins.network_k, torch.as_tensor(outlier))
+	P = torch.as_tensor(points.T, dtype=torch.float32, device=device)
+	N = torch.as_tensor(normals.T, dtype=torch.float32, device=device)
+	ex = explain_point(model, P, N, j, ins.network_k, torch.as_tensor(outlier, device=device))
 	ex = {key: (v.numpy() if hasattr(v, 'numpy') else v) for key, v in ex.items()}
 	ins.network = ex['indices'].astype(np.int64)
 	ins.explanation = ex

@@ -35,7 +35,7 @@ respect to positions are finite; `PointsAsTori` keeps `coefficients`, `model`, `
 
 ## Conventions
 
-**Device.** `points_as_tori.set_device('cuda')` once; until it is called, `get_device()` raises, and calling it again with a different device also raises (unless `force=True`). Nothing moves tensors implicitly: inputs on another device are rejected.
+**Device.** `points_as_tori.set_device('cuda')` once; without it, the first `get_device()` picks `default_device()` (`'cuda'` if torch sees a GPU, else `'cpu'`; float32), which a later `set_device` replaces. Calling `set_device` again with a different device raises (unless `force=True`). Nothing moves tensors implicitly: inputs on another device are rejected.
 - Import: `as_wide`, and the `PointsAsTori(points, normals, tori=...)` constructor, which takes the original (n, 3) layout.
 - Export: `to_numpy`, `save_tori`, `export_tori*`, `write_point_cloud`, `PointCloud3D.export`.
 

@@ -52,7 +52,7 @@ def main():
 	ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
 	ap.add_argument('cloud')
 	ap.add_argument('--model', default=DEFAULT_MODEL_PATH)
-	ap.add_argument('--device', default='cpu')
+	ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
 	ap.add_argument('--batch', type=int, default=128, help='neighborhoods per network call (attention: k² per head)')
 	a = ap.parse_args()
 

@@ -44,14 +44,27 @@ def test_pipeline_on_meta_device(meta):
 	assert pat.compute_optimal_radius(config.as_wide(points, 3)).shape == ()
 
 
-def test_device_must_be_set_explicitly(monkeypatch):
+def test_default_device(monkeypatch):
+	"""Unset: get_device() picks cuda if torch sees one, else cpu (float32); an explicit set_device replaces it."""
 	monkeypatch.setattr(config, '_DEVICE', None)
-	with pytest.raises(RuntimeError, match='set the torch device'):
-		config.get_device()
+	monkeypatch.setattr(config, '_DTYPE', torch.float32)
+	monkeypatch.setattr(config, '_DEFAULTED', False)
+	assert config.default_device() == ('cuda' if torch.cuda.is_available() else 'cpu')
+	with monkeypatch.context() as m:  # the rule itself, also without a GPU here
+		m.setattr(torch.cuda, 'is_available', lambda: True)
+		assert config.default_device() == 'cuda'
+		m.setattr(torch.cuda, 'is_available', lambda: False)
+		assert config.default_device() == 'cpu'
+	assert config.get_device().type == config.default_device() and config.get_dtype() == torch.float32
+	config.set_device('meta', torch.float64)  # replaces the default without force
+	assert config.get_device().type == 'meta' and config.get_dtype() == torch.float64
+	with pytest.raises(RuntimeError, match='already set'):
+		config.set_device('cpu')  # an explicit choice stays
 
 
 def test_device_set_once(monkeypatch):
 	monkeypatch.setattr(config, '_DEVICE', None)
+	monkeypatch.setattr(config, '_DEFAULTED', False)
 	config.set_device('cpu')
 	config.set_device('cpu')  # same device: fine
 	with pytest.raises(RuntimeError, match='already set'):

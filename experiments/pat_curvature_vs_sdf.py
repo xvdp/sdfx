@@ -170,7 +170,7 @@ def exact_torus(model, k_model, rng, R0=0.35, r0=0.12, n=3000):
 
 if __name__ == '__main__':
 	torch.set_num_threads(os.cpu_count() or 1)
-	pat.set_device('cpu', torch.float64)
+	pat.set_device(pat.default_device(), torch.float64)
 	model, k_model = pat.FundamentalFormPredictor.load_saved_model(TORCH_MODEL)
 	rng = np.random.default_rng(0)
 	meshes(model, k_model, rng)

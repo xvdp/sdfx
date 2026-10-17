@@ -151,7 +151,7 @@ def kth_distance(P, Q, idx):
 def main():
 	ap = argparse.ArgumentParser()
 	ap.add_argument('--sizes', type=float, nargs='+', default=[2048, 2e4, 1e5, 1e6])
-	ap.add_argument('--device', default='cpu')
+	ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
 	ap.add_argument('--queries', type=int, default=100_000)
 	ap.add_argument('--threads', type=int, default=os.cpu_count())
 	ap.add_argument('--max-brute', type=float, default=2e5, help='skip O(Q·N) backends above this N on CPU')

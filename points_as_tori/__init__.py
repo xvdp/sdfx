@@ -7,7 +7,7 @@ Quickstart::
     import torch
     import points_as_tori as pat
 
-    pat.set_device('cuda')                      # once; everything below stays on this device
+    pat.set_device('cuda')                      # once (default: cuda if available, else cpu); everything below stays on it
 
     points, normals = pat.read_point_cloud('input.ply')   # (N, 3) NumPy arrays
     sdf = pat.PointsAsTori(points, normals)               # tori fitted on the device
@@ -19,7 +19,7 @@ Quickstart::
     distances_np = pat.to_numpy(distances)      # export (device -> host)
 """
 
-from .config import set_device, get_device, get_dtype, as_wide, to_numpy  # noqa: F401
+from .config import set_device, get_device, get_dtype, default_device, as_wide, to_numpy  # noqa: F401
 from .network import FundamentalFormPredictor  # noqa: F401
 from .infer import PointsAsTori, read_point_cloud  # noqa: F401
 from .shape_3d import *

@@ -22,6 +22,7 @@ import torch
 
 _DEVICE: Optional[torch.device] = None
 _DTYPE: torch.dtype = torch.float32
+_DEFAULTED = False  # _DEVICE was picked by get_device() (default_device()), not by set_device()
 
 # Number of (query, point) pairs processed per chunk by the dense / brute-force kernels.
 # Peak memory per chunk is roughly CHUNK_ELEMENTS * ~40 * sizeof(dtype) bytes.
@@ -53,9 +54,15 @@ SLANG_ADAPTER: Optional[str] = None
 SLANG_FLOAT64: bool = False
 
 
+def default_device() -> str:
+	"""'cuda' (torch's current CUDA device) if torch sees one, else 'cpu': the default of every device argument."""
+	return 'cuda' if torch.cuda.is_available() else 'cpu'
+
+
 def set_device(device: Union[str, torch.device], dtype: torch.dtype = torch.float32, force: bool = False) -> None:
 	"""
-	Set the torch device (and the floating point dtype used for geometry) for the whole package. Call once.
+	Set the torch device (and the floating point dtype used for geometry) for the whole package. Call once; without
+	the call, the first get_device() picks default_device() in float32, which a later set_device() replaces.
 
 	Args:
 		device: e.g. 'cuda', 'cuda:1', 'cpu', 'mps'
@@ -63,17 +70,21 @@ def set_device(device: Union[str, torch.device], dtype: torch.dtype = torch.floa
 			dtype of its weights, float32). The original C++ evaluated in float64.
 		force: allow changing an already set device (tests); tensors created before the change stay where they are.
 	"""
-	global _DEVICE, _DTYPE
+	global _DEVICE, _DTYPE, _DEFAULTED
 	device = torch.tensor(0, device=device).device  # force init. torch.device('cuda') returns cuda with no index
-	if _DEVICE is not None and (_DEVICE != device or _DTYPE != dtype) and not force:
+	if _DEVICE is not None and (_DEVICE != device or _DTYPE != dtype) and not (force or _DEFAULTED):
 		raise RuntimeError(f'points_as_tori device already set to {_DEVICE} ({_DTYPE}); pass force=True to change it')
 	_DEVICE = device
 	_DTYPE = dtype
+	_DEFAULTED = False
 
 
 def get_device() -> torch.device:
+	"""The package's device; if set_device() was not called, default_device() (float32) from now on."""
+	global _DEFAULTED
 	if _DEVICE is None:
-		raise RuntimeError("points_as_tori: set the torch device first, e.g. points_as_tori.set_device('cuda')")
+		set_device(default_device(), _DTYPE)
+		_DEFAULTED = True
 	return _DEVICE
 
 
