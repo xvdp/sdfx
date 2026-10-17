@@ -46,9 +46,10 @@ subpackages directly.
 
 Fitting runs SuperFit's own script from the submodule, also without installing it:
 `PYTHONPATH=ext/superfit python ext/superfit/scripts/mesh_to_assembly.py --input_path mesh.obj --save_dir out --fastmode`
-(writes `out/final_content.pkl`; `experiments/compare_pat_sup.py --fit-superfit` does this per mesh). The Python that
-runs it needs SuperFit's fitting dependencies (its `env.yml` without `-e .`, plus cubvh and kaolin built from source as
-in its README), a CUDA GPU and a watertight input mesh.
+(writes `out/final_content.pkl`; `examples/superfit/03_fit_superfit.sh mesh.obj` runs it and makes the scene). The
+Python that runs it needs SuperFit's fitting dependencies (its `env.yml` without `-e .`, plus cubvh and kaolin built
+from source as in its README) and a CUDA GPU. The input need not be watertight: SuperFit remeshes it (its signed
+distance on a grid by cubvh ray stabbing, cleaned, marching cubes) and stops if that mesh is not watertight.
 
 ## The assembly as GLSL (`glsl.py`): composition and parts
 
@@ -175,10 +176,9 @@ them translucent). Everything is in SuperFit's normalized frame. Models:
 
 - `pat`: PointsAsTori on an oriented point cloud sampled from the normalized mesh (uniform by area, face normals,
   `--pat-points`, optional `--pat-noise`); native field (tori + BVH), grid bake and the input points;
-- `sup`: the assembly (`--assembly`, `--assembly-dir`, or fitted with `--fit-superfit`: SuperFit's
-  `mesh_to_assembly.py --fastmode` in a subprocess with `PYTHONPATH=ext/superfit`, `--superfit-python` for its
-  environment, `--superfit-gpu N` = this process's `cuda:N`, results reused unless `--refit`; a failed fit leaves
-  `sup` out), baked on a grid;
+- `sup`: a SuperFit assembly fitted beforehand (`--suppkl`, paired in order with `--mesh`; alone, the mesh path
+  stored in the assembly is used), baked on a grid; a mesh without one gets PAT and `gt` and the commands to fit
+  SuperFit to it (`examples/superfit/03_fit_superfit.sh`);
 - `gt`: the mesh's signed distance baked on a grid (cubvh 'raystab' as SuperFit, or the generalized winding number;
   `--gt none` to leave it out).
 

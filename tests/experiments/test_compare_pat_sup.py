@@ -1,7 +1,7 @@
 """
 experiments/compare_pat_sup.py: the merged scene of both fits (PAT fitted here, SUP from an assembly built with
-SuperFit's classes), the SuperFit fitting command (subprocess stubbed), and the metric definitions, checked on the
-ground truth against itself and a shifted copy.
+SuperFit's classes), how --mesh and --suppkl pair (an assembly's stored mesh, the hint for a mesh without one), and the
+metric definitions, checked on the ground truth against itself and a shifted copy.
 """
 
 import importlib.util
@@ -94,7 +94,7 @@ def test_both_fits_in_one_scene(tmp_path, cpu64, monkeypatch):
 	knot = os.path.join(REPO, 'ext', 'points-as-tori', 'data', 'knot.obj')
 	monkeypatch.setattr(cmp, 'NEAR_SURFACE_POINTS', 5000)
 	out = tmp_path / 'out'
-	cmp.main(['--mesh', knot, '--assembly', assembly, '-o', str(out), '--device', 'cpu', '--float64', '--res', '20',
+	cmp.main(['--mesh', knot, '--suppkl', assembly, '-o', str(out), '--device', 'cpu', '--float64', '--res', '20',
 			  '--pat-points', '3000', '--gt', 'gwn', '--metrics'])  # fmt: skip
 	scene = Scene.load(str(out / 'knot.sdfx'))
 	assert [f['name'] for f in scene.fields] == ['pat.pat', 'pat.pat_grid', 'sup.sup', 'sup.sup_grid', 'gt']
@@ -112,46 +112,67 @@ def test_both_fits_in_one_scene(tmp_path, cpu64, monkeypatch):
 	assert rows[0]['iou@20'] > 0.8 > rows[1]['iou@20']
 	# without --metrics: scene only
 	out2 = tmp_path / 'out2'
-	cmp.main(['--mesh', knot, '--assembly', assembly, '-o', str(out2), '--device', 'cpu', '--float64', '--res', '16',
+	cmp.main(['--mesh', knot, '--suppkl', assembly, '-o', str(out2), '--device', 'cpu', '--float64', '--res', '16',
 			  '--skip-pat', '--gt', 'none'])  # fmt: skip
 	assert [f['name'] for f in Scene.load(str(out2 / 'knot.sdfx')).fields] == ['sup.sup', 'sup.sup_grid']
 	assert not (out2 / 'metrics.jsonl').exists()
 
 
-def test_fit_superfit_command(tmp_path, monkeypatch):
-	"""mesh_to_assembly.py from ext/superfit with PYTHONPATH (no installation), GPU selection, config, reuse."""
-	calls = []
+def test_inputs_pairing(tmp_path, cpu64, capsys):
+	"""--mesh and --suppkl pair in order; --suppkl alone uses the mesh stored in the assembly (a missing one stops);
+	a mesh without --suppkl gets the hint to fit SuperFit; shape names from the mesh file (its folder for mesh.*)."""
+	from types import SimpleNamespace
 
-	def run(cmd, cwd, env, check):
-		calls.append((cmd, cwd, env))
-		save_dir = cmd[cmd.index('--save_dir') + 1]
-		with open(os.path.join(save_dir, 'final_content.pkl'), 'wb') as f:
-			pickle.dump({'input_path': cmd[cmd.index('--input_path') + 1]}, f)
+	helpers = superfit_test_helpers()
+	knot = os.path.join(REPO, 'ext', 'points-as-tori', 'data', 'knot.obj')
+	stored = str(tmp_path / 'stored.pkl')  # SuperFit's dataset scripts store input_mesh_file: here the knot
+	helpers.write_assembly(stored, {'iter_0.best_program': helpers.assembly_expr()}, n_iters=1)
+	data = pickle.load(open(stored, 'rb'))
+	data['input_mesh_file'] = knot
+	pickle.dump(data, open(stored, 'wb'))
+	missing = str(tmp_path / 'missing.pkl')  # written by write_assembly: input_mesh_file /data/mesh.obj
+	helpers.write_assembly(missing, {'iter_0.best_program': helpers.assembly_expr()}, n_iters=1)
 
-	monkeypatch.setattr(cmp.subprocess, 'run', run)
-	monkeypatch.delenv('SUPERFIT_CONFIG', raising=False)
-	monkeypatch.setenv('PYTHONPATH', '/elsewhere')
-	monkeypatch.delenv('CUDA_VISIBLE_DEVICES', raising=False)
-	if not os.path.isfile(os.path.join(cmp.SUPERFIT_DIR, 'scripts', 'mesh_to_assembly.py')):
-		pytest.skip('ext/superfit not checked out')
-	save_dir = str(tmp_path / 'superfit' / 'knot')
-	path = cmp.fit_superfit('knot.obj', save_dir, '/env/bin/python', gpu=1, extra_args='--ablation 8')
-	assert path == os.path.join(save_dir, 'final_content.pkl') and os.path.isfile(path)
-	((cmd, cwd, env),) = calls
-	assert cmd[:2] == ['/env/bin/python', os.path.join(cmp.SUPERFIT_DIR, 'scripts', 'mesh_to_assembly.py')]
-	assert cmd[-3:] == ['--fastmode', '--ablation', '8']
-	assert cmd[cmd.index('--input_path') + 1] == os.path.abspath('knot.obj')
-	assert cwd == cmp.SUPERFIT_DIR
-	assert env['PYTHONPATH'] == os.pathsep.join([cmp.SUPERFIT_DIR, '/elsewhere']) and env['CUDA_VISIBLE_DEVICES'] == '1'
-	if not os.path.isfile(os.path.join(cmp.SUPERFIT_DIR, 'superfit_config.json')):
-		cfg = json.load(open(env['SUPERFIT_CONFIG']))
-		assert cfg['data_base'] == str(tmp_path / 'superfit' / 'data')
-	# an existing result is reused; --refit runs again
-	cmp.fit_superfit('knot.obj', save_dir, '/env/bin/python')
-	assert len(calls) == 1
-	cmp.fit_superfit('knot.obj', save_dir, '/env/bin/python', refit=True)
-	assert len(calls) == 2 and 'CUDA_VISIBLE_DEVICES' not in calls[1][2]
-	# --superfit-gpu N is this process's cuda:N
-	monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '3,2')
-	cmp.fit_superfit('knot.obj', save_dir, '/env/bin/python', gpu=1, refit=True)
-	assert calls[2][2]['CUDA_VISIBLE_DEVICES'] == '2'
+	def args(mesh=None, suppkl=None, limit=0):
+		return SimpleNamespace(mesh=mesh, suppkl=suppkl, limit=limit)
+
+	assert cmp.stored_mesh(stored) == (knot, True) and cmp.stored_mesh(missing) == ('/data/mesh.obj', False)
+	assert list(cmp.shapes(args(suppkl=[stored]))) == [('knot', knot, stored)]
+	assert list(cmp.shapes(args(mesh=['a/b.obj', 'c/mesh.ply'], suppkl=['x.pkl', 'y.pkl']))) == [
+		('b', 'a/b.obj', 'x.pkl'),
+		('c', 'c/mesh.ply', 'y.pkl'),
+	]
+	assert list(cmp.shapes(args(mesh=['a/b.obj', 'c/d.glb'], limit=1))) == [('b', 'a/b.obj', None)]
+	with pytest.raises(SystemExit, match='not on this machine'):
+		list(cmp.shapes(args(suppkl=[missing])))
+	with pytest.raises(SystemExit, match='pair one to one'):
+		list(cmp.shapes(args(mesh=['a.obj'], suppkl=['x.pkl', 'y.pkl'])))
+	# the stored path may be wrong here and the mesh given: --mesh wins
+	assert list(cmp.shapes(args(mesh=[knot], suppkl=[missing]))) == [('knot', knot, missing)]
+
+	# a mesh without --suppkl: PAT and the ground truth, and the commands to fit SuperFit and compare with it
+	out = tmp_path / 'out'
+	cmp.main(
+		[
+			'--mesh',
+			knot,
+			'-o',
+			str(out),
+			'--device',
+			'cpu',
+			'--float64',
+			'--res',
+			'12',
+			'--pat-points',
+			'500',
+			'--gt',
+			'gwn',
+		]
+	)
+	text = capsys.readouterr().out
+	assert 'no --suppkl for knot' in text and f'03_fit_superfit.sh {knot}' in text
+	assert f'--suppkl {os.path.join(REPO, "examples", "out", "superfit", "knot", "final_content.pkl")}' in text
+	assert 'without SuperFit (no --suppkl): knot' in text
+	from sdfview.scene import Scene
+
+	assert [f['name'] for f in Scene.load(str(out / 'knot.sdfx')).fields] == ['pat.pat', 'pat.pat_grid', 'gt']

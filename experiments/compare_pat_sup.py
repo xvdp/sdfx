@@ -2,36 +2,31 @@
 Fit the same shapes with Points as Tori (PAT) and SuperFit (SUP) and write both fits into one scene per shape, to be
 toggled or overlaid in the viewer; metrics optional (--metrics).
 
-	# PAT fit + SuperFit fit (SuperFit's scripts/mesh_to_assembly.py from ext/superfit, run in a subprocess)
-	python experiments/compare_pat_sup.py --mesh a.obj b.obj --fit-superfit --device cuda:0 --superfit-gpu 1 -o out/
-	# PAT fit + existing SuperFit assemblies (e.g. the Hugging Face release) with the meshes they were fitted to
-	python experiments/compare_pat_sup.py --assembly A.pkl --mesh A.obj --device cuda -o out/
-	python experiments/compare_pat_sup.py --assembly-dir release/dataset/toys4k/superfrustum --mesh-root /data/toys4k \
-		--device cuda -o out/ --limit 20
+	# PAT fitted here + SuperFit assemblies (.pkl) fitted beforehand; --mesh and --suppkl pair in order
+	python experiments/compare_pat_sup.py --mesh data/a.obj data/b.ply --suppkl fits/a/final_content.pkl fits/b/final_content.pkl -o out/
+	# an assembly alone: the mesh is the one stored in it (the path SuperFit was given), if it exists here
+	python experiments/compare_pat_sup.py --suppkl dataset/partobjaverse/superfrustum/<id>/primitive_assembly.pkl -o out/
+	# a mesh alone: PAT and the ground truth (a warning prints how to fit SuperFit to it)
+	python experiments/compare_pat_sup.py --mesh data/a.obj -o out/
 	# view: G cycles the opaque model, V overlays the others, T makes them translucent
 	python -m sdfview view out/<shape>.sdfx
+
+SuperFit is not run here: fit it with its own script (examples/superfit/03_fit_superfit.sh: scripts/mesh_to_assembly.py
+from ext/superfit, in an environment with SuperFit's dependencies and a CUDA GPU) and pass the result with --suppkl. A
+shape is named after its mesh file (after its folder when the file is mesh.*, as in Toys4K).
 
 Per shape, everything in SuperFit's normalized frame (the mesh read as SuperFit reads it, trimesh force='mesh',
 process=False, then p_n = s (p - c), s = 1.8 / max bounding-box extent, c = bounding-box centre):
   pat  oriented point cloud of --pat-points samples, uniform by area on the normalized mesh with face normals
        (optionally with Gaussian position noise --pat-noise), then PointsAsTori (pre-trained network + torus fit);
        the scene holds its native field (tori + BVH, k = 32), a grid bake of it and the input points;
-  sup  SuperFit's assembly as superfit_sdf.SuperFitSDF (deterministic argmax reduction): generated GLSL (the
-       composition of its primitives and each primitive alone; keys [ ] and U in the viewer) and a grid bake; the
-       assembly is given (--assembly / --assembly-dir) or fitted (--fit-superfit);
+  sup  SuperFit's assembly (--suppkl) as superfit_sdf.SuperFitSDF (deterministic argmax reduction): generated GLSL
+       (the composition of its primitives and each primitive alone; keys [ ] and U in the viewer) and a grid bake;
   gt   the input mesh's signed distance baked on a grid (--gt: cubvh 'raystab' as SuperFit, or the generalized winding
        number; 'none' = no gt model).
 Output: <out>/<shape>.sdfx, the three scenes merged (sdfview.scene.merge_scenes; fields 'pat.pat', 'pat.pat_grid',
 'sup.sup', 'sup.sup_grid', 'gt'; point cloud 'pat.pat_points'); the fit times and counts are in the scene meta
 (python -m sdfview info).
-
-SuperFit fitting (--fit-superfit) runs ext/superfit/scripts/mesh_to_assembly.py --fastmode with PYTHONPATH=ext/superfit
-(SuperFit itself need not be installed) in --superfit-python, which must have SuperFit's fitting dependencies (its
-env.yml: cubvh, kaolin, fastsweep, drjit, cc3d, igl, geolipi, sysl3d); the input must be watertight. SuperFit runs on
-its process's CUDA device 0: --superfit-gpu N runs it on this process's cuda:N (CUDA_VISIBLE_DEVICES for the
-subprocess); a failed fit leaves 'sup' out of that shape's scene. Results go to <out>/superfit/<shape>/ (final_content.pkl, config.json) and are reused on later runs unless
---refit; when neither SUPERFIT_CONFIG nor ext/superfit/superfit_config.json is set, its data_base (torch.compile cache
-of --fastmode) is <out>/superfit/data instead of a directory inside the submodule.
 
 --metrics also writes <out>/metrics.jsonl, one row per shape and model, with SuperFit's definitions
 (algos/eval_tools.py) where they apply:
@@ -54,11 +49,8 @@ mesh and the argmax assembly.
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
-import shlex
-import subprocess
 import sys
 import time
 
@@ -66,7 +58,6 @@ import numpy as np
 import torch
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-SUPERFIT_DIR = os.path.join(REPO, 'ext', 'superfit')
 sys.path.insert(0, REPO)
 
 import points_as_tori as pat  # noqa: E402
@@ -234,62 +225,25 @@ def run_pat(vertices, faces, n_points: int, seed: int, noise: float):
 	return sdf, time.perf_counter() - t
 
 
-def fit_superfit(
-	mesh_path: str, save_dir: str, python: str, gpu=None, extra_args: str = '', refit: bool = False
-) -> str:
-	"""
-	SuperFit fit of one mesh: ext/superfit/scripts/mesh_to_assembly.py --fastmode in a subprocess (PYTHONPATH =
-	ext/superfit, no installation); returns save_dir/final_content.pkl (reused unless refit).
-	"""
-	assembly = os.path.join(save_dir, 'final_content.pkl')
-	if os.path.isfile(assembly) and not refit:
-		print(f'  SuperFit: reusing {assembly}', flush=True)
-		return assembly
-	script = os.path.join(SUPERFIT_DIR, 'scripts', 'mesh_to_assembly.py')
-	if not os.path.isfile(script):
-		raise FileNotFoundError(f'{script} not found: git submodule update --init ext/superfit')
-	os.makedirs(save_dir, exist_ok=True)
-	env = dict(os.environ)
-	env['PYTHONPATH'] = os.pathsep.join([SUPERFIT_DIR] + [x for x in [env.get('PYTHONPATH')] if x])
-	if gpu is not None:  # torch's cuda:<gpu> in this process, through this process's CUDA_VISIBLE_DEVICES if set
-		visible = [x.strip() for x in env.get('CUDA_VISIBLE_DEVICES', '').split(',') if x.strip()]
-		env['CUDA_VISIBLE_DEVICES'] = visible[int(gpu)] if visible else str(gpu)
-	if not env.get('SUPERFIT_CONFIG') and not os.path.isfile(os.path.join(SUPERFIT_DIR, 'superfit_config.json')):
-		# SuperFit's paths default to directories inside its repository (torch.compile cache: <data_base>/project_sf/aot)
-		base = os.path.dirname(os.path.abspath(save_dir))
-		cfg = os.path.join(base, 'superfit_config.json')
-		with open(cfg, 'w') as f:
-			json.dump({'data_base': os.path.join(base, 'data'), 'outputs_base': os.path.join(base, 'outputs')}, f)
-		env['SUPERFIT_CONFIG'] = cfg
-	cmd = [python, script, '--input_path', os.path.abspath(mesh_path), '--save_dir', os.path.abspath(save_dir),
-		   '--fastmode'] + shlex.split(extra_args)  # fmt: skip
-	print('  SuperFit: ' + ' '.join(shlex.quote(x) for x in cmd), flush=True)
-	if torch.cuda.is_available():
-		torch.cuda.empty_cache()  # this process's cached blocks, so SuperFit can use the GPU memory
-	t = time.perf_counter()
-	subprocess.run(cmd, cwd=SUPERFIT_DIR, env=env, check=True)
-	print(f'  SuperFit: {time.perf_counter() - t:.1f} s', flush=True)
-	if not os.path.isfile(assembly):
-		raise FileNotFoundError(f'SuperFit wrote no {assembly}')
-	return assembly
-
-
-def assembly_mesh_path(assembly: str, mesh_root: str) -> str:
-	"""The input mesh of an assembly: its stored path, or that path re-rooted under mesh_root (longest suffix found)."""
+def stored_mesh(suppkl: str):
+	"""(path, exists): the mesh a SuperFit assembly was fitted to, as stored in its pickle (input_mesh_file from
+	SuperFit's dataset scripts, input_path from mesh_to_assembly.py)."""
 	from superfit_sdf import load_assembly
 
-	data = load_assembly(assembly)
+	data = load_assembly(suppkl)
 	stored = data.get('input_mesh_file') or data.get('input_path')
-	if stored is None:
-		raise KeyError(f'{assembly}: no input_mesh_file / input_path; pass --mesh')
-	if os.path.isfile(stored):
-		return stored
-	parts = stored.replace('\\', '/').split('/')
-	for i in range(1, len(parts)):
-		candidate = os.path.join(mesh_root or '', *parts[i:])
-		if os.path.isfile(candidate):
-			return candidate
-	raise FileNotFoundError(f'{assembly}: input mesh {stored} not found (set --mesh-root to the dataset root)')
+	return stored, bool(stored) and os.path.isfile(stored)
+
+
+def superfit_hint(name: str, mesh: str) -> str:
+	"""What to run to fit SuperFit to `mesh` and add it (printed when a mesh comes without --suppkl)."""
+	pkl = os.path.join(REPO, 'examples', 'out', 'superfit', name, 'final_content.pkl')
+	return (
+		f'  SUP: no --suppkl for {name}: this scene holds PAT and the ground truth only. To fit SuperFit to this mesh '
+		"(in an environment with SuperFit's dependencies, ext/superfit/env.yml, and a CUDA GPU):\n"
+		f'    bash {os.path.join(REPO, "examples", "superfit", "03_fit_superfit.sh")} {mesh}\n'
+		f'  then compare with it: --mesh {mesh} --suppkl {pkl}'
+	)
 
 
 # ----------------------------------------------------------------------------------------------- driver
@@ -361,43 +315,34 @@ def process(name, mesh_path, assembly, a, device, dtype, out_dir):
 	return path, rows
 
 
-def shapes(a, out_dir):
-	"""(name, mesh path, assembly path or None) for the requested inputs."""
-	if a.assembly_dir:
-		paths = sorted(glob.glob(os.path.join(a.assembly_dir, '**', 'primitive_assembly.pkl'), recursive=True))
-		for path in paths[: a.limit or None]:
-			name = os.path.basename(os.path.dirname(path))
-			yield name, assembly_mesh_path(path, a.mesh_root), path
-		return
-	assemblies = a.assembly or []
-	meshes = a.mesh or []
-	if assemblies and meshes and len(assemblies) != len(meshes):
-		raise SystemExit('--assembly and --mesh must pair one to one')
-	if assemblies and not meshes:
-		meshes = [assembly_mesh_path(x, a.mesh_root) for x in assemblies]
-	for i, mesh in enumerate(meshes[: a.limit or None]):
-		name = os.path.splitext(os.path.basename(mesh))[0]
-		assembly = assemblies[i] if assemblies else None
-		if assembly is None and a.fit_superfit:
-			save_dir = os.path.join(out_dir, 'superfit', name)
-			try:
-				assembly = fit_superfit(mesh, save_dir, a.superfit_python, a.superfit_gpu, a.superfit_args, a.refit)
-			except subprocess.CalledProcessError as e:  # e.g. a mesh that is not watertight: the scene without 'sup'
-				print(f'  SuperFit FAILED for {name} (exit {e.returncode}); see its output above', flush=True)
-		yield name, mesh, assembly
+def shape_name(mesh: str) -> str:
+	"""The mesh's file name without extension; its folder's name when the file is mesh.* (Toys4K: <shape>/mesh.obj)."""
+	stem = os.path.splitext(os.path.basename(mesh))[0]
+	return os.path.basename(os.path.dirname(os.path.abspath(mesh))) if stem == 'mesh' else stem
+
+
+def shapes(a):
+	"""(name, mesh, suppkl or None) per shape: --mesh and --suppkl pair by position; with --suppkl alone, each
+	assembly's stored mesh."""
+	meshes, pkls = list(a.mesh or []), list(a.suppkl or [])
+	if meshes and pkls and len(meshes) != len(pkls):
+		raise SystemExit(f'--mesh ({len(meshes)}) and --suppkl ({len(pkls)}) pair one to one, in order')
+	if not meshes:
+		for pkl in pkls:
+			stored, exists = stored_mesh(pkl)
+			if not exists:
+				raise SystemExit(
+					f'{pkl}: the mesh it was fitted to ({stored}) is not on this machine; give it with --mesh'
+				)
+			meshes.append(stored)
+	for mesh, pkl in list(zip(meshes, pkls or [None] * len(meshes)))[: a.limit or None]:
+		yield shape_name(mesh), mesh, pkl
 
 
 def main(argv=None):
 	ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-	ap.add_argument('--mesh', nargs='+', help='input meshes (watertight for SuperFit fitting)')
-	ap.add_argument('--assembly', nargs='+', help='SuperFit assemblies (.pkl), paired with --mesh')
-	ap.add_argument('--assembly-dir', help='directory searched for primitive_assembly.pkl (e.g. the HF release)')
-	ap.add_argument('--mesh-root', help="root to re-root the assemblies' stored mesh paths under")
-	ap.add_argument('--fit-superfit', action='store_true', help='fit SuperFit for meshes without an assembly')
-	ap.add_argument('--superfit-python', default=sys.executable, help="python with SuperFit's fitting dependencies")
-	ap.add_argument('--superfit-gpu', default=None, help='CUDA_VISIBLE_DEVICES for the SuperFit fit')
-	ap.add_argument('--superfit-args', default='', help="extra mesh_to_assembly.py arguments, e.g. '--ablation 8'")
-	ap.add_argument('--refit', action='store_true', help='fit SuperFit again even if its result exists')
+	ap.add_argument('--mesh', nargs='+', help='input meshes (any format trimesh reads: obj, ply, glb, stl, off, ...)')
+	ap.add_argument('--suppkl', nargs='+', help='SuperFit assemblies (.pkl), paired in order with --mesh')
 	ap.add_argument('--program', default='best', help="assembly program: 'best', 'latest' or a key")
 	ap.add_argument('-o', '--out', required=True, help='output directory')
 	ap.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', help='PAT / evaluation device')
@@ -411,8 +356,8 @@ def main(argv=None):
 	ap.add_argument('--limit', type=int, default=0, help='first N shapes only')
 	ap.add_argument('--seed', type=int, default=0)
 	a = ap.parse_args(argv)
-	if not (a.mesh or a.assembly or a.assembly_dir):
-		ap.error('give --mesh, --assembly or --assembly-dir')
+	if not (a.mesh or a.suppkl):
+		ap.error('give --mesh and / or --suppkl')
 	if a.metrics and a.gt == 'none':
 		ap.error('--metrics needs a ground truth (--gt auto, cubvh or gwn)')
 
@@ -422,8 +367,12 @@ def main(argv=None):
 	os.makedirs(a.out, exist_ok=True)
 	results = os.path.join(a.out, 'metrics.jsonl')
 	all_rows, written = [], []
-	for name, mesh, assembly in shapes(a, a.out):
+	without_sup = []
+	for name, mesh, assembly in shapes(a):
 		print(f'--- {name}: {mesh}' + (f' | {assembly}' if assembly else ''), flush=True)
+		if assembly is None:
+			print(superfit_hint(name, mesh), flush=True)
+			without_sup.append(name)
 		try:
 			path, rows = process(name, mesh, assembly, a, device, dtype, a.out)
 		except Exception:  # noqa: BLE001  (one bad shape does not stop a dataset run)
@@ -448,6 +397,8 @@ def main(argv=None):
 		print(f'wrote {results}')
 	if written:
 		print(f'view: python -m sdfview view {written[0]}   (G: opaque model, V: overlay, T: translucent)')
+	if without_sup:
+		print(f'without SuperFit (no --suppkl): {", ".join(without_sup)}')
 
 
 def summary(rows, res):
