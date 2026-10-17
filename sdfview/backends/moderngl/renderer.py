@@ -324,9 +324,12 @@ class Renderer:
 		finally:
 			fbo.release()
 
-	def set_inspection(self, ins, show_torus: bool = True, show_network: bool = True) -> None:
+	def set_inspection(
+		self, ins, show_torus: bool = True, show_network: bool = True, attribution: Optional[str] = None
+	) -> None:
 		"""Show an Inspection (sdfview.inspector.inspect) in the following frames: its torus (translucent), the blended
-		points by weight, the network neighborhood, the principal circles and directions; None clears it."""
+		points by weight, the network neighborhood (flat, or colored by attribution 'gradient' / 'rollout' when
+		ins.explanation is set), the principal circles and directions; None clears it."""
 		from ... import inspector
 
 		self._release_inspection()
@@ -334,7 +337,7 @@ class Renderer:
 			return
 		pc = next(iter(self.scene.pointclouds), {})
 		radius = float(pc.get('radius', 0.005 * self.diagonal))
-		pos, rad, col = inspector.marks(self.scene, ins, radius, network=show_network)
+		pos, rad, col = inspector.marks(self.scene, ins, radius, network=show_network, attribution=attribution)
 		seg, seg_col = inspector.lines(ins, max(ins.radius, 2 * radius))
 		ctx = self.ctx
 		mprog, _ = self.program('marks.vert', 'marks.frag')

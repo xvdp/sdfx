@@ -5,6 +5,7 @@ oriented point cloud for display and, optionally, a grid bake of the field for f
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import numpy as np
@@ -30,6 +31,7 @@ def scene_from_pat(
 	point_radius: Optional[float] = None,
 	name: str = 'pat',
 	meta: Optional[dict] = None,
+	curvatures: bool = True,
 ) -> Scene:
 	"""
 	Args:
@@ -40,6 +42,10 @@ def scene_from_pat(
 		bake_resolution: if set, also sample the field (torch, k-NN mode with this k) on a grid of this many
 			samples along the longest box side and add it as field '<name>_grid'
 		point_radius: display radius; None -> 0.4 · mean nearest-neighbor spacing estimate
+		curvatures: when the tori were predicted by the network here (PointsAsTori.coefficients), also store per point
+			'<name>/forms' (n, 8): the 6 coefficients (a00, a01, a10, a11, a02, a20), 0, 0; '<name>/curvature' (n, 4):
+			κ_min, κ_max, a00, 0; '<name>/frames' (n, 12): (dir_min, 0), (dir_max, 0), (n*, 0) (points_as_tori.explain
+			curvature_frame); the tori inspector shows them (sdfview/inspector.py)
 	"""
 	tdf = getattr(sdf, '_tdf', sdf)
 	if tdf.centers is None:
@@ -69,6 +75,31 @@ def scene_from_pat(
 	scene.add_array(f'{name}/tori', tori.to(torch.float32).cpu().numpy())
 	for key, a in gpu.items():
 		scene.add_array(f'{name}/{key}', a)
+	extra_arrays = {}
+	coefficients = getattr(sdf, 'coefficients', None)
+	if curvatures and coefficients is not None:
+		frame = sdf.curvatures()
+		zeros = torch.zeros(n, dtype=points.dtype, device=points.device)
+
+		def rows(*cols):  # (n, c) float32 host array from (n,) / (3, n) device tensors
+			parts = [c[:, None] if c.dim() == 1 else c.T for c in cols]
+			return torch.cat(parts, dim=1).to(torch.float32).cpu().numpy()
+
+		extra_arrays = {
+			'forms': rows(coefficients, zeros, zeros),
+			'curvature': rows(frame['kappa_min'], frame['kappa_max'], frame['a00'], zeros),
+			'frames': rows(frame['dir_min'], zeros, frame['dir_max'], zeros, frame['normal'], zeros),
+		}
+		for key, a in extra_arrays.items():
+			scene.add_array(f'{name}/{key}', a)
+	from points_as_tori.infer import DEFAULT_MODEL_PATH
+
+	model_path = getattr(sdf, 'model_path', None)
+	network = {}
+	if getattr(sdf, 'network_k', None):
+		# neighborhood the network predicted each torus from, and the network (tori inspector: attribution)
+		network['network_k'] = int(sdf.network_k)
+		network['network_model'] = 'bundled' if model_path == DEFAULT_MODEL_PATH else os.path.abspath(model_path)
 	scene.add_field(
 		{
 			'name': name,
@@ -80,10 +111,12 @@ def scene_from_pat(
 				'isovalue': 0.0,
 				'bvh_depth': int(bvh.depth.max()),
 				'bvh_leaf_size': int(leaf_size),
-				# neighborhood the network predicted each torus from (tori inspector); absent for tori read from a file
-				**({'network_k': int(sdf.network_k)} if getattr(sdf, 'network_k', None) else {}),
+				**network,  # absent for tori read from a file
 			},
-			'arrays': {key: f'{name}/{key}' for key in ('points', 'tori', 'bvh_bounds', 'bvh_nodes', 'bvh_prims')},
+			'arrays': {
+				key: f'{name}/{key}'
+				for key in ('points', 'tori', 'bvh_bounds', 'bvh_nodes', 'bvh_prims', *extra_arrays)
+			},
 		}
 	)
 	scene.add_pointcloud(f'{name}_points', f'{name}/points', f'{name}/normals', radius=point_radius)

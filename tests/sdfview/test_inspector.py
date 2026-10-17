@@ -140,3 +140,64 @@ def test_pick_and_draw(gl, fitted):
 	r.set_inspection(None)
 	assert np.array_equal(r.render(cam, s, size), plain)
 	r.release()
+
+
+@pytest.fixture(scope='module')
+def network_scene():
+	"""tooth.ply (every 4th point) fitted by the bundled network: the scene carries forms, curvature and frames."""
+	import os
+
+	from sdfview.scene import Scene
+
+	config.set_device('cpu', torch.float32, force=True)
+	p, n = pat.read_point_cloud(
+		os.path.join(os.path.dirname(__file__), '..', '..', 'ext', 'points-as-tori', 'data', 'tooth.ply')
+	)
+	sdf = pat.PointsAsTori(p[::4], n[::4])
+	scene = scene_from_pat(sdf, k=32)
+	return Scene.from_bytes(scene.to_bytes()), sdf  # through the file format
+
+
+def test_stored_curvatures(network_scene):
+	"""The inspector shows the network's stored κ, directions and foot point; the torus recovery agrees with them."""
+	scene, sdf = network_scene
+	f = scene.field('pat')
+	assert {'forms', 'curvature', 'frames'} <= set(f['arrays']) and f['params']['network_model'] == 'bundled'
+	frame = sdf.curvatures()
+	ins = inspect(scene, scene.arrays['pat/points'][0, :3])
+	worst = 0.0
+	for rank in range(len(ins.neighbors)):
+		t = select(scene, ins, rank).torus
+		j = int(ins.neighbors[rank])
+		assert t.source == 'stored'
+		assert abs(t.kappa_max - float(frame['kappa_max'][j])) < 1e-5 * max(1, abs(t.kappa_max))
+		worst = max(
+			worst,
+			abs(t.recovered[1] - t.kappa_max) / abs(t.kappa_max),
+			abs(t.recovered[0] - t.kappa_min) / abs(t.kappa_min),
+		)
+	print(f'\nstored vs recovered from the torus: max relative |Δκ| {worst:.2e}')
+	assert worst < 1e-3
+
+
+def test_explain_network(network_scene, gl):
+	from sdfview.backends.moderngl import Renderer
+	from sdfview.inspector import describe, explain_network, marks
+
+	scene, sdf = network_scene
+	ins = inspect(scene, scene.arrays['pat/points'][5, :3])
+	ex = explain_network(scene, ins)
+	assert ex is not None and len(ex['gradient']) == len(ex['rollout']) == len(ins.network) == sdf.network_k
+	j = int(ins.neighbors[ins.selected])
+	ref = sdf.explain(j)
+	assert np.allclose(ex['gradient'], ref['gradient'].numpy(), rtol=1e-4, atol=1e-6)
+	lines = describe(ins)
+	assert any('least-squares' in ln for ln in lines) and any('gradient' in ln for ln in lines)
+	flat = marks(scene, ins, 0.01)[2]
+	colored = marks(scene, ins, 0.01, attribution='gradient')[2]
+	assert len(flat) == len(colored) and not np.array_equal(flat, colored)
+	r = Renderer(gl, scene)
+	r.set_inspection(ins, attribution='rollout')
+	img = r.render(OrbitCamera.fit(r.box_min, r.box_max), ViewSettings(show_cutplane=False), (64, 48))
+	assert img.shape == (48, 64, 4)
+	r.release()

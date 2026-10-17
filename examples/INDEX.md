@@ -14,6 +14,7 @@ examples were written on (4 threads, no GPU); GPU paths were not run there.
 | `pat/03_train_original.py` | TRAIN (original data) | the original's pre-generated datasets → the five-phase schedule, checkpoints |
 | `pat/04_train_new.py` | TRAIN (new data) | training `.npz` → checkpoint (fine-tune the bundled network, or from scratch) |
 | `pat/05_fit_trained.py` | FIT (your network) | point cloud + your checkpoint → scene with both networks' fits, differences |
+| `pat/06_network_curvatures.py` | FIT (inspection) | point cloud → the network's curvatures vs least-squares fits from 6..64 points; which neighbors drive them (gradient, attention) |
 | **SuperFit (SUP)** | | |
 | `superfit/01_test_assembly.py` | — | nothing → a small assembly in SuperFit's pickle layout (to try the SUP path) |
 | `superfit/02_assembly_to_glsl.py` | export | assembly `.pkl` → torch values, generated GLSL (whole + parts), `.sdfx`, Shadertoy `.glsl` |

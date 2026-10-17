@@ -19,6 +19,7 @@ Source: `ext/points-as-tori` (JAX/flax.nnx network + C++/nanobind evaluator), MI
 | `network.py` | `src/pointsastori/network.py` | helpers, training-side torus math (`torus_precompute_masked`, `torus_distance_gradient_masked`), export, transformer |
 | `infer.py` | `src/pointsastori/infer.py` | `PointsAsTori`, `read_point_cloud` |
 | `convert_checkpoint.py` | — | flax `.pkl` -> torch `.pt` |
+| `explain.py` | — (added) | per-point curvature frame from the coefficients; attention rollout and gradient attribution over the network's neighborhood; least-squares quadratic fit for comparison (`FundamentalFormPredictor.forward(..., return_attention=True)`, `PointsAsTori.curvatures()` / `explain(i)`) |
 | `training/train.py` | `training/train.py` | losses, schedule, train step, epoch loop, validation, checkpoints, the five-phase `train()` |
 | `training/mesh_sampling.py` | `training/mesh_sampling_jax.py` | on-the-fly query sampling and ground-truth signed distances |
 | `shape_3d.py` (`TriangleMesh`, `sample_bounding_box`) | `src/cpp/shape_3d.h/.cpp` (`Mesh3D`) + `src/pointsastori/shape_3d.py` (`TriangleMesh`) | mesh I/O, signed distance, winding numbers, ray casting, surface samplers, simulated scans |
@@ -26,6 +27,11 @@ Source: `ext/points-as-tori` (JAX/flax.nnx network + C++/nanobind evaluator), MI
 | `models/FundamentalFormPredictor.pt` | `src/pointsastori/models/FundamentalFormPredictor.pkl` | converted pre-trained weights (embed 128, 8 heads, 8 layers, mlp 512, k = 64; 1,588,358 parameters) |
 
 Function names are unchanged, including the `_jax` suffixes.
+
+Additions that do not change results: `forward(..., return_attention=True)` forms the attention weights explicitly
+(coefficients equal to the default path within 1e-5 in float32); `InputFeatures` takes the neighbor distances with a
+square root whose gradient is 0 at 0 (the center's distance to itself; forward values identical), so gradients with
+respect to positions are finite; `PointsAsTori` keeps `coefficients`, `model`, `model_path`, `network_k`.
 
 ## Conventions
 

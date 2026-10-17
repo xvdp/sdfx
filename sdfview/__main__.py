@@ -71,7 +71,7 @@ def cmd_pat(a):
 	sdf = pat.PointsAsTori(points, normals, model_path=a.model)
 	t_fit = time.perf_counter() - t
 	t = time.perf_counter()
-	scene = scene_from_pat(sdf, k=a.k, bake_resolution=a.bake, meta={'input': a.input})
+	scene = scene_from_pat(sdf, k=a.k, bake_resolution=a.bake, meta={'input': a.input}, curvatures=not a.no_curvatures)
 	t_scene = time.perf_counter() - t
 	scene.save(a.output)
 	print(f'{len(points)} points: tori {t_fit:.2f} s, BVH + export{" + bake" if a.bake else ""} {t_scene:.2f} s')
@@ -192,6 +192,9 @@ def main(argv=None):
 	p.add_argument('--model', default=None, help='network checkpoint (.pt); default: the bundled model')
 	p.add_argument('--k', type=int, default=32, help='neighbors of the blend')
 	p.add_argument('--bake', type=int, default=None, help='also store a grid bake with this many samples per side')
+	p.add_argument(
+		'--no-curvatures', action='store_true', help='without the per-point coefficients, curvatures and frames'
+	)
 	p.add_argument('--view', action='store_true', help='open the viewer afterwards')
 	p.add_argument('--up', default='y', choices=['x', 'y', 'z'])
 	p.set_defaults(func=cmd_pat)

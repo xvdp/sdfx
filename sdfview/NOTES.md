@@ -157,10 +157,20 @@ error 1.0e-5, principal directions within 0.25° (1 - |cos| 9.3e-6), equator sid
 for |a00| <= 0.01 and slopes <= 0.2 (p_t is the closest torus point to p_j, p* the network's foot point: they differ
 by ~|a00| · slope); the blend φ(x) equals the torch evaluator's to 1.1e-6.
 
+Scenes fitted by the network in the same run (`PointsAsTori.coefficients`) also store per point the 6 coefficients
+(`forms`), κ_min, κ_max, a00 (`curvature`) and the unit directions and n* (`frames`) (`sources/pat.py`, `--no-curvatures`
+to leave them out); the inspector then shows these values (κ recovered from the torus agree to 4.3e-7 relative on
+tooth.ply) and the foot point p* = p + a00 n exactly. On a selection it also runs the network on the point's
+neighborhood (`inspector.explain_network`, `points_as_tori/explain.py`, CPU): key A colors the 64 neighbors by the
+gradient attribution ‖∂(κ_min, κ_max)/∂p_j‖ or by attention rollout, and the panel lists least-squares curvatures from
+the 6 and the 64 nearest points next to the network's (`examples/pat/06_network_curvatures.py` measures both over a
+whole cloud).
+
 Drawing (`Renderer.set_inspection`): the torus as a field of type `torus` (`field_torus.glsl`, traced by
 `surface.frag` translucently in the box `inspector.torus_box`: the whole torus, or a cube around p_t when R is large);
 marks (`marks.vert/frag`: sprites from vertex attributes) and lines (`lines.vert/frag`) twice, faint without depth test
-then opaque with it, so marks behind the surface stay visible. Keys: J network neighborhood, L torus, E off.
+then opaque with it, so marks behind the surface stay visible. Keys: J network neighborhood, A its coloring
+(flat, gradient, attention rollout), L torus, E off.
 
 ## Not done yet
 

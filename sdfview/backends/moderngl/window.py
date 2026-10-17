@@ -28,7 +28,7 @@ HELP_LINES = [
 	('[ ]  U', 'parts of an assembly (whole, all parts, part 0, 1, ...) · color by part'),
 	('I O  N M', 'isovalue -/+ (shift: ×5) · PAT neighbors k -/+ (shift: ×8)'),
 	('click  , .', 'tori inspector at the clicked point · previous / next neighbor (by weight)'),
-	('J  L  E', 'inspector: network neighborhood · torus · off'),
+	('J  A  L  E', 'inspector: network neighborhood · its coloring (flat, gradient, attention) · torus · off'),
 	('1-4', 'resolution while dragging (1 = full)'),
 	('R  H  Esc', 'reset view · this help (on screen and here) · quit'),
 ]
@@ -127,6 +127,7 @@ class ViewerWindow(mglw.WindowConfig):
 		# tori inspector (sdfview/inspector.py): a left click without dragging inspects the clicked point
 		self._inspection = None
 		self._show_torus = self._show_network = True
+		self._attribution = 0  # index into inspector.ATTRIBUTIONS
 		self._press = None  # (x, y, moved) of the pressed button
 		self._update_title()
 
@@ -243,12 +244,17 @@ class ViewerWindow(mglw.WindowConfig):
 				rank = self._inspection.selected
 				self._inspection = inspector.inspect(self.scene, self._inspection.x, k=v.k, lambda_scale=v.lambda_scale)
 				inspector.select(self.scene, self._inspection, rank)
+				self._explain()
 				self._show_inspection()
 		elif key in (keys.NUMBER_1, keys.NUMBER_2, keys.NUMBER_3, keys.NUMBER_4):
 			self.drag_scale = {keys.NUMBER_1: 1, keys.NUMBER_2: 2, keys.NUMBER_3: 3, keys.NUMBER_4: 4}[key]
 		elif key in (keys.COMMA, keys.PERIOD) and self._inspection is not None:
 			step_rank = -1 if key == keys.COMMA else 1
 			inspector.select(self.scene, self._inspection, self._inspection.selected + step_rank)
+			self._explain()
+			self._show_inspection()
+		elif key == keys.A and self._inspection is not None:
+			self._attribution = (self._attribution + 1) % len(inspector.ATTRIBUTIONS)
 			self._show_inspection()
 		elif key == keys.J and self._inspection is not None:
 			self._show_network = not self._show_network
@@ -286,11 +292,24 @@ class ViewerWindow(mglw.WindowConfig):
 			print('tori inspector: the scene has no pat field')
 			return
 		self._inspection = ins
+		self._explain()
 		self._show_inspection()
+
+	def _explain(self) -> None:
+		"""Run the network on the selected point's neighborhood (attribution, least squares; needs torch)."""
+		try:
+			inspector.explain_network(self.scene, self._inspection)
+		except Exception as e:  # noqa: BLE001  (no model file, ...): the inspection without the network's view
+			print(f'tori inspector: no network attribution ({e})')
 
 	def _show_inspection(self) -> None:
 		ins = self._inspection
-		self.renderer.set_inspection(ins, show_torus=self._show_torus, show_network=self._show_network)
+		self.renderer.set_inspection(
+			ins,
+			show_torus=self._show_torus,
+			show_network=self._show_network,
+			attribution=inspector.ATTRIBUTIONS[self._attribution],
+		)
 		lines = inspector.describe(ins) if ins is not None else []
 		if lines:
 			print('\n'.join(lines))

@@ -925,21 +925,27 @@ class MultiHeadAttention(nn.Module):
 		self.out = _flax_linear(qkv_features, out_features)
 		self.dropout_rate = dropout_rate
 
-	def forward(self, x: torch.Tensor) -> torch.Tensor:
+	def forward(self, x: torch.Tensor, need_weights: bool = False):
+		"""
+		x (batch, k, in) -> (batch, k, out); with need_weights also the attention matrices (batch, heads, k, k),
+		row i = the softmax weights token i gives every token (added in the port, for points_as_tori.explain; the
+		weights are formed explicitly then, the same math as scaled_dot_product_attention).
+		"""
 		batch, k, _ = x.shape
 
 		def heads(t):
 			# (batch, k, heads * head_dim) -> (batch, heads, k, head_dim): a view with unit stride on head_dim
 			return t.view(batch, k, self.num_heads, self.head_dim).transpose(1, 2)
 
-		y = F.scaled_dot_product_attention(
-			heads(self.query(x)),
-			heads(self.key(x)),
-			heads(self.value(x)),
-			dropout_p=self.dropout_rate if self.training else 0.0,
-		)
+		q, key, v = heads(self.query(x)), heads(self.key(x)), heads(self.value(x))
+		if need_weights:
+			weights = torch.softmax(q @ key.transpose(-1, -2) / math.sqrt(self.head_dim), dim=-1)
+			y = weights @ v
+		else:
+			weights = None
+			y = F.scaled_dot_product_attention(q, key, v, dropout_p=self.dropout_rate if self.training else 0.0)
 		y = y.transpose(1, 2).reshape(batch, k, self.num_heads * self.head_dim)  # merge heads (one copy)
-		return self.out(y)
+		return (self.out(y), weights) if need_weights else self.out(y)
 
 
 class TransformerBlock(nn.Module):
@@ -970,11 +976,13 @@ class TransformerBlock(nn.Module):
 		self.norm2 = nn.LayerNorm(embed_dim, eps=1e-6)
 		self.dropout = nn.Dropout(p=dropout_rate)
 
-	def forward(self, x: torch.Tensor) -> torch.Tensor:
+	def forward(self, x: torch.Tensor, need_weights: bool = False):
 		# Self-attention block
 		residual = x
 		x = self.norm1(x)
-		x = self.attention(x)
+		x = self.attention(x, need_weights)
+		if need_weights:
+			x, weights = x
 		x = self.dropout(x)
 		x = residual + x
 
@@ -984,7 +992,7 @@ class TransformerBlock(nn.Module):
 		x = self.ffn(x)
 		x = residual + x
 
-		return x
+		return (x, weights) if need_weights else x
 
 
 def _median(x: torch.Tensor) -> torch.Tensor:
@@ -1036,7 +1044,13 @@ class InputFeatures(nn.Module):
 
 		# Regularization: scale neighborhood according to median_j |p_i - p_j|
 		diff_vectors = positions - positions[:, :, 0:1]  # [3, batch, k]
-		distances = torch.sqrt(torch.sum(diff_vectors * diff_vectors, dim=0))  # [batch, k]
+		# sqrt with gradient 0 at 0 (the center's distance to itself; d sqrt / dx is undefined there, and autograd's
+		# 0 · inf = NaN would reach every position through the center): forward values identical to torch.sqrt
+		sq = torch.sum(diff_vectors * diff_vectors, dim=0)
+		positive = sq > 0
+		distances = torch.where(
+			positive, torch.sqrt(torch.where(positive, sq, torch.ones_like(sq))), torch.zeros_like(sq)
+		)
 		median = _median(distances)  # [batch, ]
 		normalized_positions = positions / median[None, :, None]  # [3, batch, k]
 
@@ -1100,13 +1114,15 @@ class FundamentalFormPredictor(nn.Module):
 			nn.init.zeros_(self.mlp[0].weight)
 			self.mlp[0].bias.copy_(torch.tensor([0.0, 0.0, 0.0, 0.0, -0.5, -0.5]))
 
-	def forward(self, positions: torch.Tensor, normals: torch.Tensor) -> torch.Tensor:
+	def forward(self, positions: torch.Tensor, normals: torch.Tensor, return_attention: bool = False):
 		"""
 		Args:
 			positions, normals: [3, batch, k] representing a neighborhood of size k; the first point (index 0) is the center
+			return_attention: also return the attention matrices of every block (added in the port)
 
 		Returns:
-			coefficients: [6, batch] (a00, a01, a10, a11, a02, a20)
+			coefficients: [6, batch] (a00, a01, a10, a11, a02, a20); with return_attention, (coefficients, list of
+			[batch, heads, k, k] per block)
 		"""
 		# input_features: [batch, k, embed_dim]
 		# scale: [batch, ]
@@ -1114,8 +1130,13 @@ class FundamentalFormPredictor(nn.Module):
 		x = input_features
 
 		# Apply transformer blocks
+		attention = []
 		for block in self.blocks:
-			x = block(x)
+			if return_attention:
+				x, weights = block(x, need_weights=True)
+				attention.append(weights)
+			else:
+				x = block(x)
 
 		x = self.final_norm(x)  # [batch, k, embed_dim]
 
@@ -1139,7 +1160,7 @@ class FundamentalFormPredictor(nn.Module):
 			dim=0,
 		)
 
-		return coeffs
+		return (coeffs, attention) if return_attention else coeffs
 
 	def _network_dtype(self) -> torch.dtype:
 		return self.final_norm.weight.dtype

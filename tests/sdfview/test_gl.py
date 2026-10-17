@@ -217,7 +217,7 @@ cfg.on_mouse_press_event(10, 10, 1); cfg.on_mouse_drag_event(12, 10, 2, 0); cfg.
 cfg.on_mouse_scroll_event(0, 1)
 wnd.clear(); wnd.render(0.1, 0.016)
 cfg.on_mouse_press_event(80, 60, 1); cfg.on_mouse_release_event(80, 60, 1)  # a click: the tori inspector
-for key in ('PERIOD', 'J', 'L'):
+for key in ('PERIOD', 'A', 'J', 'L'):
     cfg.on_key_event(getattr(wnd.keys, key), wnd.keys.ACTION_PRESS, Mods())
 print('inspected:', cfg._inspection is not None, 'rank:', getattr(cfg._inspection, 'selected', None))
 wnd.clear(); wnd.render(0.2, 0.016)

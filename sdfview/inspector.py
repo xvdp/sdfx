@@ -33,6 +33,7 @@ cut plane), from the arrays of a scene (`pat` field: points, tori), on the host 
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -61,6 +62,11 @@ class TorusGeometry:
 	outer: bool  # p_t on the outer equator (sgn(κ_max κ_min) = +1)
 	circle_min: tuple  # (center, radius, plane normal) of the parallel through p_t
 	circle_max: tuple  # (center, radius, plane normal) of the meridian through p_t
+	# 'torus': all of the above recovered from the stored torus; 'stored': κ, directions, n*, foot point p* and the
+	# osculating circles from the scene's per-point arrays (curvature, frames: the network's own values); then
+	# `recovered` = (κ_min, κ_max) recovered from the torus, for comparison
+	source: str = 'torus'
+	recovered: Optional[tuple] = None
 
 
 @dataclass
@@ -77,6 +83,9 @@ class Inspection:
 	network: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int64))  # k_network neighbors of p_j
 	network_k: int = NETWORK_K_DEFAULT
 	radius: float = 0.0  # size of the inspected region: drawing of the torus and circles is limited to it
+	# points_as_tori.explain.explain_point for point j (explain_network): network neighborhood in order, coefficients,
+	# curvatures, attention rollout and gradient attribution per neighbor, least-squares curvatures from 6 and k points
+	explanation: Optional[dict] = None
 
 
 def pat_field(scene: Scene) -> Optional[dict]:
@@ -176,6 +185,8 @@ def select(scene: Scene, ins: Inspection, rank: int) -> Inspection:
 	ins.selected = int(rank) % len(ins.neighbors)
 	j = int(ins.neighbors[ins.selected])
 	ins.torus = torus_geometry(j, points[j], centers[j], axes[j], R[j], r[j])
+	_use_stored(scene, f, j, points[j], ins.torus)
+	ins.explanation = None
 	inliers = np.flatnonzero(~outlier)
 	kk = min(ins.network_k, len(inliers))
 	dj = np.linalg.norm(points[inliers] - points[j], axis=1)
@@ -186,22 +197,118 @@ def select(scene: Scene, ins: Inspection, rank: int) -> Inspection:
 	return ins
 
 
+def _normals(scene: Scene, field: dict) -> Optional[np.ndarray]:
+	"""Unit normals of the field's points: the point cloud sharing its points array (sdfview.sources.pat)."""
+	pts = field['arrays']['points']
+	pc = next((p for p in scene.pointclouds if p.get('positions') == pts and p.get('normals')), None)
+	if pc is None:
+		return None
+	n = np.asarray(scene.arrays[pc['normals']], np.float64)[:, :3]
+	return n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-30)
+
+
+def _use_stored(scene: Scene, field: dict, j: int, point: np.ndarray, t: TorusGeometry) -> None:
+	"""Replace the recovered curvatures by the scene's stored ones (the network's values), when present: κ, directions,
+	n*, the foot point p* = p_j + a00 n_j and the osculating circles at p* (center p* + n*/κ, radius 1/|κ|, in the plane
+	of n* and the direction; κ > 0 bends toward +n*)."""
+	arrays = field['arrays']
+	normals = _normals(scene, field)
+	if 'curvature' not in arrays or 'frames' not in arrays or normals is None:
+		return
+	k_min, k_max, a00 = (float(v) for v in scene.arrays[arrays['curvature']][j, :3])
+	fr = np.asarray(scene.arrays[arrays['frames']][j], np.float64)
+	d_min, d_max, n_star = fr[0:3], fr[4:7], fr[8:11]
+	foot = point + a00 * normals[j]
+	t.recovered = (t.kappa_min, t.kappa_max)
+	t.kappa_min, t.kappa_max = k_min, k_max
+	t.dir_min, t.dir_max, t.normal, t.foot = d_min, d_max, n_star, foot
+	t.offset = abs(a00)
+	t.circle_min = (foot + n_star / k_min, 1 / abs(k_min), np.cross(d_min, n_star)) if k_min != 0 else t.circle_min
+	t.circle_max = (foot + n_star / k_max, 1 / abs(k_max), np.cross(d_max, n_star)) if k_max != 0 else t.circle_max
+	t.source = 'stored'
+
+
+_MODELS: dict = {}
+
+
+def explain_network(scene: Scene, ins: Inspection, model=None) -> Optional[dict]:
+	"""
+	Run the network on point j's neighborhood (points_as_tori.explain.explain_point, CPU float32): the attribution of
+	every neighbor (attention rollout, gradient of κ) and least-squares curvatures for comparison. The model: `model`,
+	else the field's 'network_model' parameter ('bundled' or a checkpoint path), else the bundled one. Sets and returns
+	ins.explanation and reorders ins.network as the network saw it; None without torch / points_as_tori / normals.
+	"""
+	try:
+		import torch
+
+		from points_as_tori import config
+		from points_as_tori.explain import explain_point
+		from points_as_tori.infer import DEFAULT_MODEL_PATH
+		from points_as_tori.network import FundamentalFormPredictor
+	except ImportError:
+		return None
+	f = pat_field(scene)
+	normals = _normals(scene, f)
+	if normals is None:
+		return None
+	if model is None:
+		name = f.get('params', {}).get('network_model', 'bundled')
+		path = DEFAULT_MODEL_PATH if name == 'bundled' or not os.path.isfile(str(name)) else name
+		if path not in _MODELS:
+			try:
+				config.get_device()
+			except RuntimeError:  # nothing configured in this process: the CPU (an existing choice is kept)
+				config.set_device('cpu', torch.float32)
+			m, _ = FundamentalFormPredictor.load_saved_model(path)
+			_MODELS[path] = m.to('cpu', torch.float32).eval()
+		model = _MODELS[path]
+	points, outlier = _arrays(scene, f)[:2]
+	j = int(ins.neighbors[ins.selected])
+	P = torch.as_tensor(points.T, dtype=torch.float32)
+	N = torch.as_tensor(normals.T, dtype=torch.float32)
+	ex = explain_point(model, P, N, j, ins.network_k, torch.as_tensor(outlier))
+	ex = {key: (v.numpy() if hasattr(v, 'numpy') else v) for key, v in ex.items()}
+	ins.network = ex['indices'].astype(np.int64)
+	ins.explanation = ex
+	return ex
+
+
 def describe(ins: Inspection) -> list:
 	"""Text lines of an inspection (window panel, terminal)."""
 	t = ins.torus
 	x = ', '.join(f'{v:.4f}' for v in ins.x)
 	j = int(ins.neighbors[ins.selected])
 	solid = 'tube' if t.s > 0 else 'outside the tube'
-	return [
+	lines = [
 		f'x = ({x})   phi(x) = {ins.phi:+.5f}   k = {len(ins.neighbors)}   lambda = {ins.lam:.4g}   shift = {ins.shift:.4g}',
 		f'neighbor {ins.selected + 1}/{len(ins.neighbors)}: point {j}   weight {ins.weights[ins.selected]:.4f}   '
 		f'g_j(x) = {ins.distances[ins.selected]:+.5f}',
 		f'torus: R = {t.R:.4g}   r = {t.r:.4g}   solid: {solid}   {"outer" if t.outer else "inner"} equator   '
 		f'|p_j - p_t| = {t.offset:.3g} (≈ |a00|)',
 		f'kappa_min = {t.kappa_min:+.4g} (radius {1 / max(abs(t.kappa_min), 1e-30):.4g}, cyan)   '
-		f'kappa_max = {t.kappa_max:+.4g} (radius {1 / max(abs(t.kappa_max), 1e-30):.4g}, magenta)',
-		f'network neighborhood of point {j}: {len(ins.network)} points (green)',
+		f'kappa_max = {t.kappa_max:+.4g} (radius {1 / max(abs(t.kappa_max), 1e-30):.4g}, magenta)   '
+		+ (
+			f'[network, stored; from the torus {t.recovered[0]:+.4g}, {t.recovered[1]:+.4g}]'
+			if t.source == 'stored'
+			else '[recovered from the torus]'
+		),
 	]
+	ex = ins.explanation
+	if ex is None:
+		lines.append(f'network neighborhood of point {j}: {len(ins.network)} points (green)')
+		return lines
+	lsq = '   '.join(f'from {m} points {a:+.4g}, {b:+.4g}' for m, (a, b) in ex['least_squares'].items())
+	lines.append(f'least-squares quadratic: kappa {lsq}')
+	shares = []
+	for name in ('gradient', 'rollout'):
+		w = np.asarray(ex[name], np.float64)
+		w = w / max(float(w.sum()), 1e-300)
+		cum = np.cumsum(w)
+		shares.append(
+			f'{name}: point itself {w[0]:.2f}, nearest 6 {cum[min(5, len(w) - 1)]:.2f}, 90% within {int(np.searchsorted(cum, 0.9)) + 1}'
+		)
+	lines.append(f'network neighborhood: {len(ins.network)} points (green)   ' + '   '.join(shares))
+	return lines
 
 
 # ---- what a host draws (positions, sizes, colors; the same for every host)
@@ -221,9 +328,19 @@ def weight_color(w: float) -> tuple:
 	return (*(lo + (hi - lo) * float(np.clip(w, 0, 1))), 1.0)
 
 
-def marks(scene: Scene, ins: Inspection, point_radius: float, network: bool = True):
+ATTRIBUTIONS = (None, 'gradient', 'rollout')  # how the network neighborhood is colored (window: key A)
+
+
+def attribution_color(w: float) -> tuple:
+	"""Attribution share / max share in [0, 1] -> pale green .. dark green."""
+	lo, hi = np.array([0.8, 0.95, 0.8]), np.array([0.0, 0.4, 0.1])
+	return (*(lo + (hi - lo) * float(np.clip(w, 0, 1)) ** 0.5), 1.0)
+
+
+def marks(scene: Scene, ins: Inspection, point_radius: float, network: bool = True, attribution: Optional[str] = None):
 	"""Sprites: (positions (n, 3), radii (n,), colors (n, 4)) float32, drawn in order (later on top): the network
-	neighborhood, the k blended points by weight, point j, the foot point p_t, x."""
+	neighborhood (flat green, or by attribution 'gradient' / 'rollout' when ins.explanation is set: pale -> dark green,
+	larger), the k blended points by weight, point j, the foot point, x."""
 	f = pat_field(scene)
 	points = _arrays(scene, f)[0]
 	pos, rad, col = [], [], []
@@ -234,8 +351,16 @@ def marks(scene: Scene, ins: Inspection, point_radius: float, network: bool = Tr
 		col.append(c)
 
 	if network:
-		for i in ins.network:
-			add(points[i], 1.1 * point_radius, COLOR_NETWORK)
+		ex = ins.explanation
+		if attribution and ex is not None:
+			w = np.asarray(ex[attribution], np.float64)
+			# scaled by the strongest neighbor other than point j itself (j is drawn red; its gradient share is ~0.4)
+			w = np.clip(w / max(float(w[1:].max() if len(w) > 1 else w.max()), 1e-300), 0, 1)
+			for i, wi in sorted(zip(ins.network, w), key=lambda p: p[1]):  # strongest last: on top
+				add(points[i], point_radius * (0.8 + 1.7 * wi), attribution_color(wi))
+		else:
+			for i in ins.network:
+				add(points[i], 1.1 * point_radius, COLOR_NETWORK)
 	wmax = max(float(ins.weights.max()), 1e-30)
 	for i, w in zip(ins.neighbors[::-1], ins.weights[::-1]):  # heaviest last: on top
 		add(points[i], point_radius * (1.0 + 1.5 * w / wmax), weight_color(w / wmax))

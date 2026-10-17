@@ -52,7 +52,12 @@ class PointsAsTori:
 		points = config.as_wide(points, 3)  # (3, |P|) on the configured device
 		normals = config.as_wide(normals, 3)
 		self._tdf = TorusDistanceField(points, normals)
-		self.network_k = None  # added in the port: the network's neighborhood size, when the tori come from it
+		# added in the port, set when the tori come from the network: its neighborhood size, the model and its path,
+		# the predicted coefficients (6, |P|) (curvatures(), explain(), sdfview.sources.pat writes them to scenes)
+		self.network_k = None
+		self.model = None
+		self.model_path = None
+		self.coefficients = None
 
 		if tori_filepath is not None:
 			tori = self._load_tori(tori_filepath)
@@ -66,8 +71,10 @@ class PointsAsTori:
 
 			model, k_nb = PointsAsTori._load_model(model_path)
 			self.network_k = int(k_nb)
+			self.model, self.model_path = model, model_path
 
 			coeffs = model.precompute_coefficients_in_chunks(points, normals, k_nb, chunk_size=50000)
+			self.coefficients = coeffs
 			centers, axes, major_radii, minor_radii = fit_tori_from_forms(points, normals, coeffs)
 
 			self._tdf.set_tori(centers, axes, major_radii, minor_radii)
@@ -119,6 +126,28 @@ class PointsAsTori:
 		"""
 		self._tdf.set_k_evaluation(K_NEIGHBORS_ACCELERATION if accelerate else -1)
 		return self._tdf.evaluate_distance_gradient(queries)
+
+	def curvatures(self) -> dict:
+		"""
+		Added in the port: per point, from the network's coefficients (points_as_tori.explain.curvature_frame):
+		kappa_min, kappa_max (|P|,), dir_min, dir_max, normal (3, |P|), a00 (|P|,), foot (3, |P|) = p + a00 n.
+		Only for tori predicted by the network in this object (not for tori read from a file).
+		"""
+		from .explain import curvature_frame
+
+		if self.coefficients is None:
+			raise ValueError('no network coefficients: the tori were not predicted here')
+		return curvature_frame(self._tdf.points, self._tdf.normals, self.coefficients)
+
+	def explain(self, i: int) -> dict:
+		"""Added in the port: points_as_tori.explain.explain_point for point i (neighborhood, coefficients,
+		curvatures, attention rollout, gradient attribution, least-squares curvatures from 6 and k points)."""
+		from .explain import explain_point
+
+		if self.model is None:
+			raise ValueError('no network: the tori were not predicted here')
+		tdf = self._tdf
+		return explain_point(self.model, tdf.points, tdf.normals, i, self.network_k, tdf.is_outlier)
 
 	def get_tori(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 		"""Added in the port: tori on the device, (3, |P|), (2, |P|), (|P|,), (|P|,)."""
